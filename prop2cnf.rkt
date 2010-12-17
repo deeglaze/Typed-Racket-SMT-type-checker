@@ -109,7 +109,10 @@
 
 ; shred : Prop -> Literal * Env
 ; where Env is a Hash<Depth1Prop to DimacsLit>
-; XXX: Not the best - does not take commutativity into account for keying.
+; We do an initial structural hashing in order to spot
+; sharing. 
+; XXX: For finding more sharing, we should normalize associations
+; and order literal by some total order.
 (define (shred prop)
   (let*-values ([(env) (make-hash)] ; env is a mutable hash
 		[(top-sym total-vars)
@@ -209,6 +212,7 @@
 		     [(atomic-propositions)
 		      ;; collect all theory literals in a dictionary keyed 
 		      ;; by their propositional variable.
+		      ;; OT-theory specific!
 		      (hash-foldr
 		       (λ (prop dimacs-lit atomic-assoc)
 			  (match prop

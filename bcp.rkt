@@ -1,14 +1,19 @@
 #lang racket
-(require "data-structures.rkt")
-(require "learned-clauses.rkt")
-(require "sat-heuristics.rkt")
-(require "smt-interface.rkt")
-(require "debug.rkt")
-(require rackunit)
+(require (only-in "dimacs.rkt" 
+		  dimacs-lit->literal
+		  dimacs-lits->clause)
+	 "data-structures.rkt"
+	 "learned-clauses.rkt"
+	 "statistics.rkt"
+	 "sat-heuristics.rkt"
+	 "smt-interface.rkt"
+	 "debug.rkt"
+	 rackunit)
 
 (provide propagate-assignment
 	 resolve-conflict!
-	 initial-bcp)
+	 initial-bcp
+	 obliterate-lit!)
 
 ;bcp-clause : Clause -> SMT
 (define (bcp-clause smt clause)
@@ -45,33 +50,31 @@
     (set-literal-igraph-node! lit
 			      (node (SMT-decision-level smt) clause))
     ;; (T-solver gets priority over propositional variables)
-    (let ((smt (propagate-T-implications smt lit))
-	  (falsify (negate-literal lit)))
-      (let prop-watch ((watchlist (literal-watched falsify))
-		       (smt smt)
-		       (acc '())) ;; for clause forgetting. See note below
-	(cond [(empty? watchlist) 
-	       ;; TODO: bcp-4cases changes this list for each literal.
-	       ;; figure out how to accomodate for these changes.
-	       ;; The set-literal-watched! causes the tests to crash.
-	       (begin ;(set-literal-watched! falsify acc) ;; for clause forgetting
-		      smt)] ; done propagating. Continue.
-	      [else
-	       (if (clause-forgotten? (first watchlist))
-		   ;; don't bother. Forgotten clause.
-		   (prop-watch (rest watchlist) smt acc)
-		   ;; No conflict; keep propagating.
-		   (prop-watch (rest watchlist) 
-			       (update-watchedness smt (first watchlist) falsify)
-			       (cons (first watchlist) acc)))])))))
+    (let* ((smt (propagate-T-implications smt lit))
+	   (falsify (negate-literal lit)))
+      (let prop-watch ((itr (watched-iterate-first falsify))
+		       (smt smt))
+	(if itr
+	    (let ((watching-clause (watched-iterate-clause itr)))
+	      (if (clause-forgotten? watching-clause)
+		  (prop-watch (watched-iterate-remove itr) smt)
+		  ;; No conflict; keep propagating.
+		  (let-values ([(smt remove?) 
+				(update-watchedness smt watching-clause falsify)])
+		     (if remove? 
+			 (prop-watch (watched-iterate-remove itr) smt)
+			 (prop-watch (watched-iterate-next itr) smt)))))
+	    smt)))))
 ;; Note about clause forgetting:
 ;; We lazily forget clauses in the sense that once we have "forgotten" a clause,
 ;; we never use it in BCP. We can, however, still use it in conflict resolution,
 ;; if it is the case that a propagated literal has a forgotten clause as its antecedent.
-;; We do not always clean up forgotten clauses either, since we do not have an
-;; easy way to talk about open ended lists. Instead, we depend on the common case of
-;; no conflicts - at the end of a propagation, we bang in the accumulated list of
-;; clauses that were not forgotten as the new watch list.
+;;
+;; The new behavior of bcp-4cases:
+;; It used to be that when we moved which literal was being watched in a clause,
+;; we would immediately remove the fact that the original literal was being watched
+;; in that clause. Now that we bang in a new watched list, we have to be careful to
+;; remove these references.
 
 ;; Uses T-Propagate and T-Explain parameters
 (define (propagate-T-implications smt lit)
@@ -91,39 +94,67 @@
                ((dimacs-lits->clause (SMT-variables smt))
                 ((T-Explain) (SMT-T-State smt) (SMT-strength smt) (car lits)))))))))))
 
+
+(define (satisfy-literal! sat literal)
+  (begin (set-var-value! (literal-var literal) (literal-polarity literal))
+	 ;; for FirstUIP
+         (set-var-timestamp! (literal-var literal) 
+			     (SAT-Stats-assigned-order (SAT-statistics sat)))
+	 ;; for faster unsetting in backjumps
+         (add-to-current-decision-level (SAT-inc-assigned-order sat) literal)))
+
+(define (SMT-satisfy-literal! smt literal)
+  (SMT (satisfy-literal! (SMT-sat smt) literal)
+       ;; Tell the T-Solver a literal has been satisfied
+       ((T-Satisfy) (SMT-T-State smt) (literal->dimacs literal))
+       (SMT-strength smt)
+       (SMT-seed smt)))
+
 ; Must obliterate all decided and implied literals from 
 ; decision level to absolute level.
-; backjump! : DecisionLevel -> unit
+; backjump! : SMT * DecisionLevel * Clause -> unit
 (define (backjump! smt absolute-level learned)
   ;; now is a good time to exponentially decay activation levels
   (let ((smt (SMT-on-conflict smt))) ;; VSIDS, forget, restart
     ;; this loop destroys all assignment-related information about literals
     ;; down to (and including) absolute-level.
-    (let obliterate-loop ((levels (- (SMT-decision-level smt)
-				     absolute-level))
-			  (pa (SMT-partial-assignment smt))
-			  (total-vars-obliterated 0))
-      (cond [(not (zero? levels)) ; sat unchanged. No need to thread through
-	     (begin (for-each obliterate! (first pa))
-		    (obliterate-loop (+ -1 levels) (rest pa) 
-				     (+ (length (first pa)) 
-					total-vars-obliterated)))]
-	    [else
-	     (let* ((smt (SMT-set-decision-level smt absolute-level))
-		    ;; don't grow assigned order too much. Cut back by how many assignments
-		    ;; we have obliterated.
-		    (smt (SMT-set-assigned-order smt (- (SMT-assigned-order smt) total-vars-obliterated)))
-		    (smt (SMT-set-partial-assignment smt pa))
-		    ;; SAT-solver obliterated assignments. Tell T-solver to as well.
-		    (smt (new-T-State smt ((T-Backjump) (SMT-T-State smt) total-vars-obliterated))))
-	       ;; we only have one new clause that might have taught us something.
-	       ;; Do a quick check to see if we can learn anything before
-	       ;; going back to deciding.
-	       (learned-bcp smt learned))]))))
+    (let-values ([(pa total-vars-obliterated) 
+		  (obliterate-decision-levels!
+		   (- (SMT-decision-level smt) absolute-level)
+		   (SMT-partial-assignment smt)
+		   0)])
+      (let* ((smt (SMT-set-decision-level smt absolute-level))
+	     ;; don't grow assigned order too much. Cut back by how many assignments
+	     ;; we have obliterated.
+	     (smt (SMT-set-assigned-order smt (- (SMT-assigned-order smt) total-vars-obliterated)))
+	     (smt (SMT-set-partial-assignment smt pa))
+	     ;; SAT-solver obliterated assignments. Tell T-solver to as well.
+	     (smt (new-T-State smt ((T-Backjump) (SMT-T-State smt) total-vars-obliterated))))
+	;; we only have one new clause that might have taught us something.
+	;; Do a quick check to see if we can learn anything before
+	;; going back to deciding.
+	(learned-bcp smt learned)))))
+
+;; Nat -> (values partial-assignment total-vars-obliterated)
+(define (obliterate-decision-levels! num-levels-to-obliterate partial-assignment [total-vars-obliterated 0])
+  (cond [(zero? num-levels-to-obliterate)
+	 (values partial-assignment total-vars-obliterated)]
+	[else (obliterate-decision-levels! 
+	       (+ -1 num-levels-to-obliterate)
+	       (rest partial-assignment) 
+	       (obliterate-decision-level! (first partial-assignment)
+					   total-vars-obliterated))]))
+
+(define (obliterate-decision-level! lits total-vars-obliterated)
+  (cond [(empty? lits) total-vars-obliterated]
+	[else 
+	 (begin (obliterate-lit! (first lits))
+		(obliterate-decision-level! (rest lits) 
+					    (+ 1 total-vars-obliterated)))]))
 
 ; obliterate! : Literal -> unit
 ; unassign a literal
-(define (obliterate! lit)
+(define (obliterate-lit! lit)
   (let ((var (literal-var lit)))
     (begin (set-var-value!       var 'unassigned)
            (set-var-igraph-node! var #f)
@@ -132,30 +163,36 @@
 ; Is this clause now a unit clause? 
 ; update-watchedness : SMT * Clause * Literal -> (values SMT Maybe<Asserting-Level>)
 (define (update-watchedness smt clause decided-literal)
-  (debug "updated-clause" clause)
-  (debug "decided-literal" decided-literal)
   (let ((caseval (bcp-4cases (some-clause->clause clause) decided-literal)))
     (match caseval
-     ['skip smt] ;; clause satisfied or unknown. Continue.
+     ['skip (values smt #f)] ;; clause satisfied. Continue.
+     ['remove (values smt #t)]
      ;; propagate-assignment will do our backjumping. Return the asserting level
      ['contradiction 
       (if (= 0 (SMT-decision-level smt)) ; don't need to do resolutions.
           (raise (unsat-exn smt))
           (resolve-conflict! smt clause))]
      [unit-literal  ;; found an implied literal. Immediately propagate.
-      (propagate-assignment smt unit-literal clause)])))
+      (values (propagate-assignment smt unit-literal clause) #f)])))
 
-; returns the literal assigned most recently in the given vector of literals
-(define (choose-latest-literal literals)
-  (let find-recent ((idx 1)
-                    (candidate (vector-ref literals 0)))
-    (if (= idx (vector-length literals))
-        candidate
-        (let* ((nthlit (vector-ref literals idx)))              
-          (if (and ;(literal-implied? nthlit)
-                   ((literal-timestamp nthlit) . > . (literal-timestamp candidate)))
-              (find-recent (+ 1 idx) nthlit)
-              (find-recent (+ 1 idx) candidate))))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Functions for conflict resolution / clause learning
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; XXX: Changed to remove* to fix bug in first-uip when there is a duplicate literal
+(define (resolve-on-lit C D res-lit)
+  (define (memberf a B [proc equal?])
+    (and (not (empty? B))
+       (or (proc a (car B))
+           (memberf a (cdr B) proc))))
+  (define (list-union A B [proc equal?])
+    (cond [(empty? A) B]
+	  [(memberf (first A) B proc)
+	   (list-union (rest A) B proc)]
+	  [else (cons (first A)
+		      (list-union (rest A) B proc))]))
+  (list->vector (list-union (remove* (list (negate-literal res-lit) res-lit) (vector->list C))
+			    (remove* (list (negate-literal res-lit) res-lit) (vector->list D))
+			    literal-eq?)))
 
 ; Must resolve backwards along implied literals using their antecedents.
 ; Learn the asserting clause and return the asserting level in order
@@ -183,7 +220,7 @@
         (begin (add-literal-watched! learned watch1)
                (add-literal-watched! learned watch2)
                (let-values  ([(smt learned-clause) (SMT-learn-clause smt learned)])
-                 (if (0 . > . level-to-backjump-to)
+                 (if (0 . > . level-to-backjump-to) 
                      (raise (unsat-exn smt)) ; We can imply #f without assumptions => UNSAT
                      (raise (bail-exn (backjump! smt level-to-backjump-to learned-clause))))))))))
 
@@ -224,23 +261,17 @@
               (recur (+ 1 idx) this-declev all-same-level?*)
               (recur (+ 1 idx) candidate all-same-level?*))))))
 
-;; XXX: Changed to remove* to fix bug in first-uip when there is a duplicate literal
-(define (resolve-on-lit C D res-lit)
-  (list->vector (list-union (remove* (list (negate-literal res-lit)) (remove* (list res-lit) (vector->list C)))
-                            (remove* (list (negate-literal res-lit)) (remove* (list res-lit) (vector->list D)))
-                            literal-eq?)))
-
 ;; returns 'contradiction if no nonfalse literal
 ;; if only one nonfalse literal and it's unassigned, returns nonfalse-literal
 ;; if nonfalse and true, then 'skip
-;; if many, updates watched pointer and returns 'skip
+;; if many, updates watched pointer and returns 'remove for the list to be updated
 (define (bcp-4cases clause p [nonfalse-literal #f] [multiple #f] [idx 0])
   (cond [(= idx (clause-size clause))
          (if multiple ;; must be case 1. Mutate.
-             (begin (rem-literal-watched! clause p)
+             (begin ;(rem-literal-watched! clause p)
                     (add-literal-watched! clause nonfalse-literal) ;; variable's watch list
                     (clause-watched-swap! clause p nonfalse-literal)
-                    'skip) ;; moved pointer. Done.
+                    'remove) ;; moved pointer. Done.
              (if nonfalse-literal
                  (if (literal-unassigned? nonfalse-literal)
                      nonfalse-literal ;; UNIT (Case 2)
@@ -262,17 +293,11 @@
                    ;; there is NOT another watched literal.
                    (bcp-4cases clause p literal nonfalse-literal (+ 1 idx)))))]))
 
-(define (memberf a B [proc equal?])
-  (and (not (empty? B))
-       (or (proc a (car B))
-           (memberf a (cdr B) proc))))
-
-(define (list-union A B [proc equal?])
-  (cond [(empty? A) B]
-        [(memberf (first A) B proc)
-         (list-union (rest A) B proc)]
-        [else (cons (first A)
-                    (list-union (rest A) B proc))]))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; BCP tests
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+#|
+; initialize now in smt-solve.rkt
 
 ;; unit (case 3)
 (check equal?
@@ -306,3 +331,4 @@
 		     (literal (vector-ref (SMT-variables smt) 0)
 			      #t)));p
 	 'skip)
+|#

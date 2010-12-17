@@ -31,3 +31,6 @@
 ;; What is the starting state for the T-solver with this problem?
 (define T-Backjump (make-parameter sat-backjump))
 
+(define sat-restart (lambda (t-state) t-state))
+;; The solver has reset its assignment. T-solver should as well.
+(define T-Restart (make-parameter sat-restart))

@@ -1,10 +1,15 @@
 #lang racket
 
-(require srfi/13)
+(require srfi/13 ;; for string-tokenize
+	 "data-structures.rkt"
+	 (only-in "sat-heuristics.rkt"
+		  add-literal-watched!))
 
 (provide read-dimacs 
 	 dimacs-polarity 
 	 dimacs-lit->dimacs-var
+	 dimacs-lit->literal
+	 dimacs-lits->clause
 	 dimacscnf?)
 
 (define (read-dimacs)
@@ -32,6 +37,27 @@
   (if (dimacs-polarity lit)
       lit
       (- lit)))
+
+; DimacsLit -> Literal
+(define ((dimacs-lit->literal variables) dimacs-lit)
+  (literal 
+   (vector-ref variables (- (dimacs-lit->dimacs-var dimacs-lit) 1)) ; -1 is variable 0
+   (dimacs-polarity dimacs-lit))) ; -1 is negated. False polarity
+
+; list of DimacsLit -> Clause
+(define ((dimacs-lits->clause variables) dimacs-lits)
+  (cond
+   [(empty? dimacs-lits) ;; can't represent "false" in CNF
+    (error 'dimacs-lits->clause 
+           "There is an empty clause.  I don't think you will be satisfied.")]
+   [else 
+    (let* ((literals (list->vector (map (dimacs-lit->literal variables) dimacs-lits)))
+	   (w1 (vector-ref literals 0))
+	   (w2 (vector-ref literals (- (vector-length literals) 1)))
+	   (C (clause literals w1 w2)))
+      (add-literal-watched! C w1) ;it's safe for a clause to appear twice watched lists
+      (add-literal-watched! C w2)
+      C)]))
 
 (define (dimacscnf? x)
   (match x
