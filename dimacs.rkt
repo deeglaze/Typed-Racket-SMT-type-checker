@@ -10,6 +10,7 @@
 	 dimacs-lit->dimacs-var
 	 dimacs-lit->literal
 	 dimacs-lits->clause
+	 dimacs-cnf->clauses
 	 dimacscnf?)
 
 (define (read-dimacs)
@@ -58,6 +59,14 @@
       (add-literal-watched! C w1) ;it's safe for a clause to appear twice watched lists
       (add-literal-watched! C w2)
       C)]))
+
+(define (dimacs-cnf->clauses num-clauses vars clauses)
+  (let ((ret (make-vector num-clauses)))
+    (let recur ((idx 0) (clauses clauses))
+      (if (= idx num-clauses)
+	  ret
+	  (begin (vector-set! ret idx ((dimacs-lits->clause vars) (first clauses)))
+		 (recur (+ 1 idx) (rest clauses)))))))
 
 (define (dimacscnf? x)
   (match x

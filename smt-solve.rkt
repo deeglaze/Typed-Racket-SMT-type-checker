@@ -5,7 +5,6 @@
 	 "learned-clauses.rkt"
 	 "statistics.rkt"
 	 "sat-heuristics.rkt"
-	 "heuristic-constants.rkt"
 	 "smt-interface.rkt"
 	 "dimacs.rkt"
 	 "debug.rkt")
@@ -27,15 +26,11 @@
    ;; dimacs-style:
    [`(,var-count ,clause-count ((,lit ...) ...))
     (let ((vars (make-n-vars var-count)))
-      (SMT (SAT (list->vector (map (dimacs-lits->clause vars) lit)) ;; XXX: Could use clause-count for no intermediate list
+      (SMT (SAT (dimacs-cnf->clauses clause-count vars lit)
 		(empty-learned-clauses)
 		vars
 		'(())
-		(SAT-Stats 0 ;; decision level
-			   0 ;; assigned order
-			   FORGET_THRESHOLD_INITIAL_PERCENTAGE
-			   RESTART_INITIAL_THRESHOLD
-			   0)) ;; conflicts since last restart
+		(init-stats))
 	   t-state
 	   strength
 	   seed))]))
@@ -48,11 +43,7 @@
 	    (SMT-learned-clauses smt)
 	    (SMT-variables smt)
 	    '(())
-	    (SAT-Stats 0 ;; decision level
-		       0 ;; assigned order
-		       (SMT-forget-threshold smt)
-		       (SMT-restart-threshold smt)
-		       0)) ;; conflicts since last restart
+	    (reset-stats (SMT-statistics smt)))
        ((T-Restart) (SMT-T-State smt))
        (SMT-strength smt)
        (SMT-seed smt)))
