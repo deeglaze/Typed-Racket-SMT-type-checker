@@ -1,7 +1,0 @@
-#lang racket
-
-(require "data-structures.rkt")
-
-(define (add-explanation! t-state start end label)
-  (let ([])
-    ...))
