@@ -15,27 +15,55 @@
     (reverse-path-to-root! t-state snode)
     (add-edge! snode enode label)))
 
+;; Node * Node -> Node
+(define (least-common-ancestor a b)
+  (let ([aseen (make-hash)]
+        [bseen (make-hash)])
+    (let loop ([anode a]
+               [bnode b]
+               [b-next #f]) ;; #f if a next, #t if b next
+      (let-values ([(key hash anode bnode)
+                    (if b-next
+                        (values b aseen anode (Node-next bnode))
+                        (values a bseen (Node-next anode) bnode))])
+        (if (hash-has-key? hash key)
+            key
+            (if key
+                (begin (hash-set! hash key #t)
+                       (loop anode bnode (not b-next)))
+                (error "LCA: not in same eqv class ~a ~a" a b)))))))
+
 (define (explain t-state consteq)
-  (let ([UF (instantiate union-find%)]
-        [a (ConstEQ-a₁ consteq)]
-        [b (ConstEQ-a₂ consteq)]
-        [c (LCA a b)]) ;; least-common-ancestor
-    (append (explain-along-path t-state UF a c)
-            (explain-along-path t-state UF b c))))
+  (explain-aux t-state (instantiate union-find% ()) consteq))
+
+(define (explain-aux t-state UF consteq)
+  (let ([anode (get-node t-state (ConstEQ-a₁ consteq))]
+        [bnode (get-node t-state (ConstEQ-a₂ consteq))]
+        [ab-lca (least-common-ancestor a b)])
+    (append (explain-along-path t-state UF anode ab-lca)
+            (explain-along-path t-state UF bnode ab-lca))))
 
 (define (explain-along-path t-state UF a c)
   (let loop ([pending '()]
              [a (send UF find a)])
-         [anode (get-node t-state a)])
     (if (eqv? a c)
-        (for/list ([consteq pending])
-          (explain t-state pending))
-        (let ([bnode (Node-next anode)])
+        (for/list ([consteq pending]) ;; explain the rest
+          (explain-aux t-state UF pending))
+        (let ([b (Node-next anode)])
+          (send UF union a b) ;; a and b have a common ancestor, thus equal.
           (match (Node-outlabel anode)
             [(? ConstEQ? a=b)
-             (list (dict-ref (EUF-state-equalities t-state) a=b))]
-            [(? EQpair? fa₁a₂=a×fb₁b₂=b)
-             ...])))) ;; TODO
+             (cons (dict-ref (EUF-state-eqlit t-state) a=b) ;; emit a=b literal as explanation.
+                   (loop pending (send UF find b)))]
+            [(EQpair (CurriedEQ a₁ a₂ a)
+                     (CurriedEQ b₁ b₂ b))
+             ;; emit structural equality explanation.
+             (list* (dict-ref (EUF-state-eqlit t-state) (CurriedEQ a₁ a₂ a))
+                    (dict-ref (EUF-state-eqlit t-state) (CurriedEQ a₁ a₂ a))
+                    (loop (list* (ConstEQ a₁ b₁) ;; explain the extentional equality.
+                                 (ConstEQ a₂ b₂)
+                                 pending)
+                          (send UF find b)))])))))
 #|
 This next mutation heavy function has a trick to it. We need to
 maintain the invariant that (Node-size node) = # children of node.
@@ -72,5 +100,4 @@ this path and at the end, subtract that from its size.
   (set-Node-size! enode (+ 1 (Node-size snode) (Node-size enode))))
 
 (define (get-node t-state tvar)
-  (bthash-ref (EUF-state-proof t-state) tvar
-              (λ () (error "get-node: internal error"))))
+  (bthash-ref (EUF-state-proof t-state) tvar (Node #f 0 #f)))

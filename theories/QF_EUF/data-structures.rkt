@@ -1,5 +1,6 @@
 #lang racket
 
+(require "struct-with-set.rkt")
 (provide (all-defined-out))
 
 ;; QF_EUF: Quantifier free theory of uninterpreted functions with equality
@@ -16,7 +17,7 @@
 
 ;; A Term is a Var or an App
 (struct Var (x) #:transparent) ;; x : Natural
-(struct App (f args) #:transparent) ;; f : Symbol, args : (Listof Term)
+(struct App (f arg) #:transparent) ;; f : Symbol, args : Term
 ;; l and r are Terms.
 (struct Equality (l r) #:transparent)
 
@@ -25,7 +26,7 @@
 (define TVar? exact-nonnegative-integer?)
 
 ;; f(g,arg) = a
-(struct CurriedEQ (g arg a) #:transparent) ;; all TVars
+(struct CurriedEQ (g arg a) #:transparent) ;; TVars
 ;; a = b
 (struct ConstEQ (a₁ a₂) #:transparent) ;; TVars
 
@@ -39,20 +40,34 @@
 
 ;; The entire theory solver state.
 
-(struct EUF-state (equalities ;; DimacsVar ↦ Equality
-                   backjump-table ;; Satisfaction-level ↦ DimacsVar
-                   [satisfaction-level #:mutable] ;; Natural that gets bumped each T-Satisfy.
-                   ;; the rest of these are backtrackable hash tables
-                   [representative #:mutable] ;; TVar ↦ TVar
-                   [classes #:mutable]        ;; TVar ↦ Listof TVar
-                   [uses #:mutable]           ;; TVar ↦ Listof CurriedEQ
-                   [lookup #:mutable]         ;; (Pair TVar TVar) ↦ CurriedEQ (Var₁ ≤ Var₂)
-                   [proof #:mutable]          ;; TVar ↦ Node
-                   ) #:transparent)
+(struct-with-set EUF-state (equalities ;; DimacsVar ↦ Equality
+;;                            to-propagate ;; DimacsVar ↦ Boolean (#f iff the equality has been propagated)
+                            eqlit ;; Equality ↦ DimacsLit
+                            backjump-table ;; Satisfaction-level ↦ (Listof DimacsVar)
+                            satisfaction-level ;; Natural that gets bumped each T-Satisfy.
+                            last-consistency-check ;; satisfaction-level the last T-Consistent? was called
+                            ;; the rest of these are backtrackable hash tables
+                            representative ;; TVar ↦ TVar
+                            classes        ;; TVar ↦ Listof TVar
+                            uses           ;; TVar ↦ Listof CurriedEQ
+                            lookup         ;; (Pair TVar TVar) ↦ CurriedEQ (Var₁ ≤ Var₂)
+                            proof          ;; TVar ↦ Node
+                            ) #:transparent)
+
+(define-syntax-rule (seq/EUF-state t-state e ... tail)
+  (let* ([t-state e] ...)
+    tail))
+
+(define-syntax-rule (for/EUF-state t-state ([x e] ...) body ...)
+  (let loop ([t-state t-state]
+             [x e] ...)
+    (if (or (empty? x) ...)
+        t-state
+        (loop (seq/EUF-state t-state body ...) (cdr x) ...))))
 
 ;; useful for stacking changes at different satisfaction levels
 ;; to backtrack easily.
-(struct aged-hash (timestamp hash))
+(struct-with-set aged-hash (timestamp hash))
 ;; A backtrack-hash as a (Listof aged-hash) such that the most recent
 ;; hash is first, then second most recent, etc.
 
@@ -60,8 +75,8 @@
   (hash-ref (aged-hash-hash hash) key failure))
 (define (aged-hash-has-key? ahash key)
   (hash-has-key? (aged-hash-hash hash) key))
-(define (aged-hash-set! ahash key value)
-  (hash-set! (aged-hash-hash hash) key value))
+(define (aged-hash-set ahash key value)
+  (set-aged-hash-hash ahash (hash-set (aged-hash-hash hash) key value)))
 
 ;; We just want the most recent value for the given key
 (define (bthash-ref bthash key)
@@ -69,16 +84,16 @@
        (aged-hash-ref (car bthash) key)))
 
 ;; INVARIANT: (pair? bthash)
-(define (bthash-set! bthash key value)
-  (aged-hash-set! (car bthash) key value))
+(define (bthash-set bthash key value)
+  (aged-hash-set (car bthash) key value))
 
 ;; remove all ahashes with timestamp >= given timestamp
 (define (bthash-backtrack-to bthash timestamp)
-  (memf (λ (ahash) (< (aged-hash-timestap ahash) timestamp)) bthash))
+  (memf (λ (ahash) (< (aged-hash-timestamp ahash) timestamp)) bthash))
 
 ;; INVARIANT: (empty? bthash) or (> timestamp (aged-hash-timestamp (car bthash)))
 (define (bthash-new-age bthash timestamp)
   (if (empty? bthash)
-      (list (aged-hash timestamp (make-hash)))
-      (cons (aged-hash timestamp (copy-hash (aged-hash-hash (car bthash))))
+      (list (aged-hash timestamp (make-immutable-hash)))
+      (cons (aged-hash timestamp (aged-hash-hash (car bthash)))
             bthash)))

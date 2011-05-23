@@ -78,20 +78,23 @@
 ;; and keep things sane.
 (define union-find%
   (class object%
-         (init-field elem↦disjoint-set (make-hash))
-         
+         (init-field (elem↦disjoint-set (make-hash)))
+
+         (define/private (find-internal elem)
+           (find! (hash-ref! elem↦disjoint-set
+                             elem
+                             (λ () (make-set elem)))))
+
          (define/public (find elem)
-           (disjoint-set-elem (find! (hash-ref! elem↦disjoint-set
-                                                elem
-                                                (λ () (make-set elem))))))
+           (disjoint-set-elem (find-internal elem)))
 
-         (define (union elem₁ elem₂)
-           (union! (find elem₁) (find elem₂)))
+         (define/public (union elem₁ elem₂)
+           (union! (find-internal elem₁) (find-internal elem₂)))
 
-         (define (all-eqv-classes elem)
+         (define/public (all-eqv-classes)
            (set-eqv-classes (hash-values elem↦disjoint-set)))
 
-         (define (elem-eqv-class elem)
+         (define/public (elem-eqv-class elem)
            (set-eqv-class (hash-ref! elem↦disjoint-set elem (λ () (make-set elem)))
                           (hash-values elem↦disjoint-set)))
          (super-new)))
