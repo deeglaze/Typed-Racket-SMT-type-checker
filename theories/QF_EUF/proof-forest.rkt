@@ -3,17 +3,19 @@
 (require "data-structures.rkt"
          "unionfind.rkt")
 
-(provide add-explanation! explain)
+(provide add-explanation explain)
 
-(define (add-explanation! t-state start end label)
-  (let*-values ([(snode) (get-node t-state start)]
-                [(enode) (get-node t-state end)]
-                [(start snode enode) ;; WLOG |start| ≤ |end|
+;; FIXME: Traversal is all screwed up due to the new hash way of doing things.
+
+(define (add-explanation proof start end label)
+  (let*-values ([(proof snode) (get-node proof start)]
+                [(proof enode) (get-node proof end)]
+                [(start end snode enode) ;; WLOG |start| ≤ |end|
                  (if (<= (Node-size snode) (Node-size enode))
-                     (values start snode enode)
-                     (values end enode snode))])
-    (reverse-path-to-root! t-state snode)
-    (add-edge! snode enode label)))
+                     (values start end snode enode)
+                     (values end start enode snode))]
+                [(proof) (reverse-path-to-root proof start)])
+    (add-edge proof start end label)))
 
 ;; Node * Node -> Node
 (define (least-common-ancestor a b)
@@ -33,35 +35,37 @@
                        (loop anode bnode (not b-next)))
                 (error "LCA: not in same eqv class ~a ~a" a b)))))))
 
-(define (explain t-state consteq)
-  (explain-aux t-state (instantiate union-find% ()) consteq))
+(define (explain eqlit proof consteq)
+  (explain-aux eqlit proof (instantiate union-find% ()) consteq))
 
-(define (explain-aux t-state UF consteq)
-  (let ([anode (get-node t-state (ConstEQ-a₁ consteq))]
-        [bnode (get-node t-state (ConstEQ-a₂ consteq))]
-        [ab-lca (least-common-ancestor a b)])
-    (append (explain-along-path t-state UF anode ab-lca)
-            (explain-along-path t-state UF bnode ab-lca))))
+(define (explain-aux eqlit proof UF consteq)
+  (let* ([a (ConstEQ-a₁ consteq)]
+         [b (ConstEQ-a₂ consteq)]
+         [ab-lca (least-common-ancestor a b)])
+    (append (explain-along-path eqlit proof UF a ab-lca)
+            (explain-along-path eqlit proof UF b ab-lca))))
 
-(define (explain-along-path t-state UF a c)
+;; a,c : TVar
+(define (explain-along-path eqlit proof UF a c)
   (let loop ([pending '()]
              [a (send UF find a)])
     (if (eqv? a c)
         (for/list ([consteq pending]) ;; explain the rest
-          (explain-aux t-state UF pending))
-        (let ([b (Node-next anode)])
+          (explain-aux eqlit proof UF pending))
+        (let* ([anode (bthash-ref proof a)]
+               [b (Node-next anode)])
           (send UF union a b) ;; a and b have a common ancestor, thus equal.
           (match (Node-outlabel anode)
             [(? ConstEQ? a=b)
-             (cons (dict-ref (EUF-state-eqlit t-state) a=b) ;; emit a=b literal as explanation.
+             (cons (dict-ref eqlit a=b) ;; emit a=b literal as explanation.
                    (loop pending (send UF find b)))]
             [(EQpair (CurriedEQ a₁ a₂ a)
-                     (CurriedEQ b₁ b₂ b))
+                     (CurriedEQ c₁ c₂ c))
              ;; emit structural equality explanation.
-             (list* (dict-ref (EUF-state-eqlit t-state) (CurriedEQ a₁ a₂ a))
-                    (dict-ref (EUF-state-eqlit t-state) (CurriedEQ a₁ a₂ a))
-                    (loop (list* (ConstEQ a₁ b₁) ;; explain the extentional equality.
-                                 (ConstEQ a₂ b₂)
+             (list* (dict-ref eqlit (CurriedEQ a₁ a₂ a))
+                    (dict-ref eqlit (CurriedEQ c₁ c₂ c))
+                    (loop (list* (ConstEQ a₁ c₁) ;; explain the extentional equality.
+                                 (ConstEQ a₂ c₂)
                                  pending)
                           (send UF find b)))])))))
 #|
@@ -73,31 +77,33 @@ it previously had.
 We thus add up how many children this root will be losing by reversing
 this path and at the end, subtract that from its size.
 |#
-(define (reverse-path-to-root! node [weight-of-path 0])
-  (if (Node-next node)
-      (begin
-        (reverse-path-to-root! (Node-next node)
-                               (+ 1 (Node-size node) weight-of-path))
-        (set-Node-size! node (add1 (Node-size (Node-next node))))
-        ;; Reverse the outgoing edge
-        (set-Node-next! (Node-next node) node)
-        ;; node -L-> next (node == (Node next _ L)) is now
-        ;; next -L-> node (next == (Node node _ L))
-        (set-Node-outlabel! (Node-next node) (Node-outlabel node))
-        ;; node is now root.
-        (set-Node-next! node #f)
-        (set-Node-outlabel! node #f))
-      (set-Node-size! node (- (Node-size node) weight-of-path))))
+(define (reverse-path-to-root proof node-num [weight-of-path 0])
+  (let* ([node (bthash-ref proof node-num)]
+         [next-node-num (Node-next node)])
+    (if next-node-num
+        (let* ([proof (reverse-path-to-root proof next-node-num
+                                            (+ 1 (Node-size node) weight-of-path))]
+               ;; updated in reversal
+               [next-node (bthash-ref proof next-node-num)]
+               ;; node -->X, |node| = 1 + |next|
+               [proof (bthash-set proof node
+                                  (Node #f (add1 (Node-size next-node)) #f))])
+          ;; next -L-> node, size hasn't changed.
+          (bthash-set proof next-node-num (Node node-num (Node-size next-node) (Node-outlabel node))))
+        (bthash-set proof node-num (set-Node-size node (- (Node-size node) weight-of-path))))))
 
-(define (add-edge! snode enode label)
-  ;; s -> e
-  (set-Node-next! snode enode)
-  ;; s -L-> e
-  (set-Node-outlabel! snode label)
-  ;; s has |s| children.
-  ;; e had |e| children.
-  ;; With s, e will have 1 + |s| more children (we now count s)
-  (set-Node-size! enode (+ 1 (Node-size snode) (Node-size enode))))
+(define (add-edge proof start end label)
+  ;; s -L-> e  with size |s|
+   (bthash-set proof
+               start
+               (Node end
+                     (Node-size (bthash-ref proof start))
+                     label)))
 
-(define (get-node t-state tvar)
-  (bthash-ref (EUF-state-proof t-state) tvar (Node #f 0 #f)))
+(define (get-node proof tvar)
+  (let ([result (bthash-ref proof tvar)])
+    (if result
+        (values proof result)
+        (let ([new-node (Node #f 0 #f)])
+          ;; if it doesn't exist, make a new node for it.
+          (values (bthash-set proof tvar new-node) new-node)))))

@@ -23,7 +23,7 @@
 ;; why was this able to be satisfied?
 (define T-Explain (make-parameter sat-explain))
 
-(define sat-consistent? (lambda (t-state strength) #t))
+(define sat-consistent? (lambda (t-state strength) (values t-state #t)))
 ;; Is the current assignment consistent? If not, why not?
 (define T-Consistent? (make-parameter sat-consistent?))
 
@@ -33,4 +33,7 @@
 
 (define sat-restart (lambda (t-state) t-state))
 ;; The solver has reset its assignment. T-solver should as well.
+;; This is just like doing T-Backjump with all the literals, but
+;; doing a restart this way can potentially waste effort to maintain
+;; some invariants when obliterating everything is just what you need.
 (define T-Restart (make-parameter sat-restart))

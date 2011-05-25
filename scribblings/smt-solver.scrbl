@@ -2,28 +2,26 @@
 @(require scribble/manual
           scribble/eval
           scribble/basic
-	  (planet cce/scheme:7)
-	  racket/sandbox
-	  (only-in unstable/scribble declare-exporting/this-package)
+          (planet cce/scheme:7)
+          racket/sandbox
+          (only-in unstable/scribble declare-exporting/this-package)
           (for-label (this-package-in smt-solve)
                      (this-package-in smt-interface)
                      (this-package-in dimacs)))
 
 @(define dimacs-eval 
    (make-scribble-evaluator 'racket/base
-		   #:requires (list "dimacs.rkt" "smt-solve.rkt")))
-
+                   #:requires (list "dimacs.rkt" "smt-solve.rkt")))
 
 @title[#:tag "top"]{An SMT-solver for Racket}
 @author[(author+email "Ian Johnson" "ianj@ccs.neu.edu")
         (author+email "Paul Stansifer" "pauls@ccs.neu.edu")]
 
-
 This package contains an SMT-solver written using the DPLL(T) framework. 
 Its mechanics include conflict-based learned with the first unique implication point heuristic, 
 efficient unit resolution with the 2-literal watching heuristic,
-and ``smart'' literal choice with the variable state independent, decaying sum heuristic (popularized by the CHAFF solver).
-Soon to be implemented: clause forgetting with the Minisat policy, and random restarts with the Picosat policy.
+``smart'' literal choice with the variable state independent, decaying sum heuristic (popularized by the CHAFF solver), 
+clause forgetting with the Minisat policy, and random restarts with the Picosat policy. 
 
 @table-of-contents[]
 
@@ -38,16 +36,20 @@ The main function of the SMT solver is
 @defproc[(smt-solve [cnf dimacscnf?]
                     [t-state any/c]
                     [strength strength?]
+                    [seed (or/c exact-nonnegative-integer? #f)]
                     [choose-literal (SMT? . -> . Literal?)])
-         (or/c sat-exn? unsat-exn?)]{
-Which takes a CNF, initial T-State, initial Strength and possibly a choice function and returns
-the result as a struct encapsulating the final SMT state.}
+         (or/c sat-exn? unsat-exn?)]{ Which takes a CNF, initial
+T-State, initial Strength, the seed to give to
+@racket[random-seed] (or @racket[#f] to use the current clock) and
+possibly a choice function and returns the result as a struct
+encapsulating the final SMT state.}
 
 Derived interfaces are
 
 @defproc[(smt-assign [cnf dimacscnf?]
                      [t-state any/c]
                      [strength strength?]
+                     [seed (or/c exact-nonnegative-integer? #f)]
                      [choose-literal (SMT? . -> . Literal?)])
          (or/c 'UNSAT (listof exact-integer?))]{
 Uses @racket[smt-solve] to return @racket['UNSAT] or the partial model in the form of all satisfied DimacsLits.}
@@ -55,17 +57,21 @@ Uses @racket[smt-solve] to return @racket['UNSAT] or the partial model in the fo
 @defproc[(smt-decide [cnf dimacscnf?]
                      [t-state any/c]
                      [strength strength?]
+                     [seed (or/c exact-nonnegative-integer? #f)]
                      [choose-literal (SMT? . -> . Literal?)])
          (or/c 'UNSAT 'SAT)]{
 Like @racket[smt-assign], but does not extract the final model.}
 
 @defproc[(sat-solve [cnf dimacscnf?]
+                    [seed (or/c exact-nonnegative-integer? #f)]
                     [choose-literal (SMT? . -> . Literal?)])
          (or/c sat-exn? unsat-exn?)]
 @defproc[(sat-assign [cnf dimacscnf?]
+                     [seed (or/c exact-nonnegative-integer? #f)]
                      [choose-literal (SMT? . -> . Literal?)])
          (or/c 'UNSAT (listof exact-integer?))]
 @defproc[(sat-decide [cnf dimacscnf?]
+                     [seed (or/c exact-nonnegative-integer? #f)]
                      [choose-literal (SMT? . -> . Literal?)])
          (or/c 'UNSAT 'SAT)]{
 Like smt-x, but initially parameterizes by the trivial theory.}
@@ -84,8 +90,10 @@ Like smt-x, but initially parameterizes by the trivial theory.}
 }
 
 
-This is a fully fledged DPLL(T) SMT solver, but there are so common theories implemented. 
-To write a theory solver, you must maintain the following interfaces:
+This is a fully fledged DPLL(T) SMT solver, but there are no common
+theories implemented. There are currently no plans to use the FFI to
+communicate with third party theory solvers. To write a theory solver,
+you must maintain the following interfaces:
 
 @itemlist[
   @item{
@@ -98,7 +106,7 @@ To write a theory solver, you must maintain the following interfaces:
    Currently there is no logic to modify strength in the SAT solver, so it is coarse-grained.
    The SMT solver takes an initial strength value.
    At a time the SAT solver has a model, it will call T-Consistent? with @racket[+inf.0] strength.
-   This is paramount for completeness. If this is not what you want, you can change it in sat-solve.rkt
+   This is paramount for completeness. If this is not what you want, you can change it in smt-solve.rkt
    at its only callsite.}
   @item{
    The SMT solver should be driven externally. We mean that the SAT solver only understands DimacsLits,
@@ -110,6 +118,8 @@ To write a theory solver, you must maintain the following interfaces:
              (any/c exact-integer? . -> . any/c)]
    @defthing[T-Backjump
              (any/c exact-nonnegative-integer? . -> . any/c)]
+   @defthing[T-Restart?
+	     (any/c . -> . any/c)]
    @defthing[T-Propagate
 	     (any/c strength? exact-integer? . -> . any/c)]
    @defthing[T-Explain
@@ -124,6 +134,8 @@ To write a theory solver, you must maintain the following interfaces:
             any/c]
    @defproc[(sat-backjump [t-state any/c]
                           [backjump-by-sats exact-nonnegative-integer?])
+	    any/c]
+   @defproc[(sat-restart  [t-state any/c])
 	    any/c]
    @defproc[(sat-propagate [t-state any/c]
 			   [strength strength?]

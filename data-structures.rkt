@@ -47,6 +47,19 @@
 (define (SMT-set-partial-assignment smt val)
   (new-SAT smt (set-partial-assignment (SMT-sat smt) val)))
 
+(define (vars->clause-of-not-and vars)
+  (let* ((negate-assigned
+	  (map (lambda (v)
+		 (literal v (not (var-value v))))
+		 vars))
+	 (clause-list (list->vector negate-assigned)))
+  (clause clause-list
+	  (vector-ref clause-list 0)
+	  (vector-ref clause-list (+ -1 (vector-length clause-list))))))
+(define (not-partial-assignment smt)
+  (vars->clause-of-not-and (filter-not var-unassigned? 
+				       (vector->list (SMT-variables smt)))))
+
 (define (SAT-set-statistics sat val)
   (SAT (SAT-clauses sat)
        (SAT-learned-clauses sat)

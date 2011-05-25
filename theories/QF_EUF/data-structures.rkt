@@ -30,23 +30,31 @@
 ;; a = b
 (struct ConstEQ (a₁ a₂) #:transparent) ;; TVars
 
+(define (internal-eq? x)
+  (or (CurriedEQ? x)
+      (ConstEQ? x)))
+
 ;; l and r are CurriedEQ
 (struct EQpair (l r) #:transparent)
 
 ;; Graph nodes for the proof forest
-(struct Node ([next #:mutable] ;; Option Node      ;; #f if root
-              [size #:mutable] ;; Natural
-              [out-label #:mutable])) ;; (U EQpair ConstEQ #f) ;; #f if root
+;; Option TVar, Natural, Option (U EQpair ConstEQ) (#f if root)
+(struct Node (next size outlabel))
+(define (set-Node-size node size)
+  (Node (Node-next node)
+        size
+        (Node-outlabel node)))
 
 ;; The entire theory solver state.
 
 (struct-with-set EUF-state (equalities ;; DimacsVar ↦ Equality
-;;                            to-propagate ;; DimacsVar ↦ Boolean (#f iff the equality has been propagated)
-                            eqlit ;; Equality ↦ DimacsLit
-                            backjump-table ;; Satisfaction-level ↦ (Listof DimacsVar)
                             satisfaction-level ;; Natural that gets bumped each T-Satisfy.
                             last-consistency-check ;; satisfaction-level the last T-Consistent? was called
+                            tmp-tv ;; Natural (used for flattening intermediate equalities)
+                            last-sat ;; Option Equality (used for lightweight T-Consistent?)
                             ;; the rest of these are backtrackable hash tables
+                            eqlit ;; Equality ↦ Option DimacsLit
+                            backjump-table ;; Satisfaction-level ↦ DimacsVar
                             representative ;; TVar ↦ TVar
                             classes        ;; TVar ↦ Listof TVar
                             uses           ;; TVar ↦ Listof CurriedEQ
@@ -86,6 +94,17 @@
 ;; INVARIANT: (pair? bthash)
 (define (bthash-set bthash key value)
   (aged-hash-set (car bthash) key value))
+
+(define (bthash-iterate-first bthash)
+  (and (pair? bthash)
+       (hash-iterate-first (aged-hash-hash (car bthash)))))
+(define (bthash-iterate-next bthash itr)
+  (hash-iterate-next (aged-hash-hash (car bthash)) itr))
+(define (bthash-iterate-key bthash itr)
+  (hash-iterate-key (aged-hash-hash (car bthash)) itr))
+(define (bthash-iterate-value bthash itr)
+  (hash-iterate-value (aged-hash-hash (car bthash)) itr))
+
 
 ;; remove all ahashes with timestamp >= given timestamp
 (define (bthash-backtrack-to bthash timestamp)

@@ -281,7 +281,6 @@
 
 (define empty-type-env (hasheqv))
 
-
  ;; if ± then prove valid. if (not ±) then prove invalid.
 (define (prove-± prop strength ±)
   (let-values (((cnf initial-t-state _) (prop->cnf `(not ,prop))))
@@ -316,8 +315,6 @@
             (raise (type-exn 
                     (format "Found a counterexample to ~s:~%~s" 
                             prop (cnf-pa->prop-pa assignment))))])])))
-
-
 
 (define (first-type Γ-type sym)
   (let ((ret (type-env-lookup Γ-type sym)))

@@ -1,252 +1,184 @@
 #lang racket
-(require rackunit)
-(require srfi/1)
-(require "ts-data-structures.rkt")
-(require "simplify.rkt")
-(require "dimacs.rkt")
 
-(provide (all-defined-out))
+(provide prop->cnf bconn? hash-foldr)
+
+; A Boolean connective (bconn) is
+(define (bconn? x) (memq x '(or and not implies)))
 
 ;A Prop is one of
-; - `(: ,Symbol ,Type)      ;;; this is the only proposition to interpret
-; - `(not ,Prop)
-; - `(implies ,Prop ,Prop)
-; - `(or ,Prop ,Prop)
-; - `(and ,Prop ,Prop)
+; - `(,bconn ,Prop ...)
 ; - #f
 ; - #t
-
+; - other     ;;; interpreted
 
 ;A Literal is one of
 ; - Symbol
 ; - `(not Symbol)
 
 ;A Depth1Prop is one of
-; - `(: ,Symbol ,Type)           ;this Symbol is from a different namespace than the one above
-; - `(not ,Literal)
-; - `(implies ,Literal ,Literal)
-; - `(or ,Literal ...)
-; - `(and ,Literal ...)
+; - `(,bconn ,Literal ...)
 ; - #f
 ; - #t
+; - other
 
+(define (uninterpreted-prop? x)
+  (not (or (boolean? x)
+           (and (pair? x)
+                (bconn? (car x))))))
 
-(struct T-Lit (sym τ dimacs-lit level) #:transparent)
-
-; Assoc<variable Sym to List<T-Lit>> * Assoc<DimacsVar to T-Lit> * Assoc<satisfaction level Nat to variable Pos> * Nat 
-(struct T-State (type-info atomic-propositions backjump-table satisfaction-level) #:transparent)
-
-(define (initial-t-state atomic-propositions) (T-State '() atomic-propositions '() 0))
-
-(define (T-Lit-invert t-lit)
-  (T-Lit (T-Lit-sym t-lit)
-         (T-Lit-τ t-lit)
-         (- (T-Lit-dimacs-lit t-lit))
-         (T-Lit-level t-lit)))
-
-(define (T-Lit-unassign t-lit)
-  (T-Lit (T-Lit-sym t-lit)
-         (T-Lit-τ t-lit)
-         (dimacs-lit->dimacs-var (T-Lit-dimacs-lit t-lit))
-         #f))
-
-(define (T-Lit-unassigned? t-lit)
-  (false? (T-Lit-level t-lit)))
-(define (T-Lit-polarity t-lit)
-  (dimacs-polarity (T-Lit-dimacs-lit t-lit)))
-(define (T-Lit-function? t-lit)
-  (abs? (T-Lit-τ t-lit)))
-
-(define (T-Lit-dimacs-var t-lit)
-  (dimacs-lit->dimacs-var (T-Lit-dimacs-lit t-lit)))
-
-(define (T-Lit-and-±->prop t-lit ±)
-  (if ±
-      `(: ,(T-Lit-sym t-lit) ,(T-Lit-τ t-lit))
-      `(not (: ,(T-Lit-sym t-lit) ,(T-Lit-τ t-lit)))))
-
-(define (T-Lit->prop t-lit)
-  (T-Lit-and-±->prop t-lit (T-Lit-polarity t-lit)))
+(define (remove-prop-booleans prop)
+  (match prop
+    [`(not ,prop*)
+     (let ([rprop* (remove-prop-booleans prop*)])
+       (if (boolean? rprop*)
+           (not rprop*)
+           `(not ,rprop*)))]
+    [`(implies ,prop1 ,prop2)
+     (let ([rprop1 (remove-prop-booleans prop1)])
+       (cond [(eqv? rprop1 #t) ;; TT => P == P
+              (remove-prop-booleans prop2)]
+             [(false? rprop1) ;; FF => P == TT
+              #t]
+             [else
+              (let ([rprop2 (remove-prop-booleans prop2)])
+                (cond [(eqv? rprop2 #t);; P => TT == P
+                       rprop1]
+                      [(false? rprop2) ;; P => FF == (not P)
+                       `(not ,rprop1)]
+                      [else ;; general case
+                       `(implies ,rprop1 ,rprop2)]))]))]
+    [`(and ,props ...)
+     (let ([rprops (map remove-prop-booleans props)])
+       (cond [(memq #f rprops)
+              #f]
+             [else (let ([rprops-no-t (remove* (list #t) rprops)])
+                     (or (empty? rprops-no-t)
+                         rprops-no-t))]))]
+    [`(or ,props ...)
+     (let ([rprops (map remove-prop-booleans props)])
+       (cond [(memq #t rprops)
+              #t]
+             [else (let ([rprops-no-f (remove* (list #f) rprops)])
+                     (and (pair? rprops-no-f)
+                          rprops-no-f))]))]
+    [other other]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Utility functions
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; Given a list, value to thread, and binary function returning 2 values, 
-;; thread through the second of the two values while accumulating the first
-(define (map-threading binary-2value-fn thread lst)
-  (if (empty? lst)
-      (values '() thread)
-      (let*-values ([(val thread) (binary-2value-fn (car lst) thread)]
-		    [(acc thread) (map-threading binary-2value-fn thread (cdr lst))])
-	  (values (cons val acc)
-		  thread))))
-
-
 (define (hash-foldr fn base hash)
   (let recur ((i (hash-iterate-first hash)))
-    (if (not i)
-        base
+    (if i
         (fn (hash-iterate-key hash i)
             (hash-iterate-value hash i)
-            (recur (hash-iterate-next hash i))))))
+            (recur (hash-iterate-next hash i)))
+        base)))
 
-(define (hash-reduce-threading fn acc base thread hash)
-  (let recur ((i (hash-iterate-first hash))
-	      (thread thread))
-    (if (not i)
-        (values base thread)
-	(let*-values ([(val thread) (fn (hash-iterate-key hash i)
-					(hash-iterate-value hash i)
-					thread)]
-		      [(rest thread) (recur (hash-iterate-next hash i) thread)])
-	  (values (acc val rest)
-		  thread)))))
+(define (hash-reduce fn acc base hash)
+  (let recur ([itr (hash-iterate-first hash)])
+    (if itr
+	(acc (fn (hash-iterate-key hash itr)
+                 (hash-iterate-value hash itr))
+             (recur (hash-iterate-next hash itr)))
+        base)))
+
+(define (incbox! b) (set-box! b (add1 (unbox b))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Tseitin transform functions
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-; shred : Prop -> Literal * Env
+; shred : Prop * Box Natural * Hash<Prop,Natural> -> Literal
 ; where Env is a Hash<Depth1Prop to DimacsLit>
 ; We do an initial structural hashing in order to spot
-; sharing. 
+; sharing.
 ; XXX: For finding more sharing, we should normalize associations
 ; and order literal by some total order.
-(define (shred prop)
-  (let*-values ([(env) (make-hash)] ; env is a mutable hash
-		[(top-sym total-vars)
-		 ;; shredrec : Prop -> Sym
-		 (let shredrec ((p prop)
-				(varnum 1)) ;; use numbers instead of gensym
-		   (match p
-			  [`(: ,sym ,type)
-			   (values (hash-ref! env p varnum) (+ 1 varnum))]
-			  [`(not ,p)
-			   (let-values ([(d1prop varnum) (shredrec p varnum)])
-			     (values (- d1prop) varnum))]
-			  [`(,op ,ps ...)
-			   (let-values ([(d1props varnum) 
-					 (map-threading shredrec varnum ps)])
-			     (values (hash-ref! env (cons op d1props) varnum)
-				     (+ 1 varnum)))]
-			  [t-or-f
-			   (error "[Internal error] Literal false or true found!")]))])
-    (values top-sym total-vars env)))
-
-
-(define-values (test-top-sym total-vars test-env)
-  (shred '(or (not (: s1 τ1))
-              (and (: s2 τ2)
-                   (: s3 τ3)
-                   (: s4 τ4))
-              (: s5 τ5))))
-
-;flip the hash
-(define test-back-env (make-hash (map (λ (v) (cons (cdr v) (car v))) (hash->list test-env))))
-
-(define test-p1 (hash-ref test-back-env test-top-sym))
-(check equal? (car test-p1) 'or)
-
-(define test-p2 (hash-ref test-back-env (caddr test-p1))) ;second element
-(check equal? (car test-p2) 'and)
-
-(define test-p3 (hash-ref test-back-env (cadddr test-p2))) ;third element
-(check equal? test-p3 '(: s4 τ4))
+(define (shred prop varnum env)
+ ;; shredrec : Prop -> Sym
+  (let shredrec ([p prop])
+    (match p
+      [`(not ,p)
+       (- (shredrec p))]
+      [`(,(? bconn? op) ,ps ...)
+       (let ([d1props (map shredrec ps)])
+         (printf "hi~%")
+         (begin0 (hash-ref! env (cons op d1props) (unbox varnum))
+                 (incbox! varnum)))]
+      [(? boolean? x)
+       (error "[Internal error] Literal false or true found!")]
+      [other ;; intepreted
+       (incbox! varnum)
+       (hash-ref! env p (unbox varnum))])))
 
 ;; Tseitin transform depth1props to Dimacs format.
 ;; This means counting the number of clauses created.
-(define (wff-hash->cnf env)
+(define (wff-hash->cnf env num-clauses)
   ;; some shorthand for easy reading
   (define (implies p . q) (list* (- p) q))
   (define (implies* p q) (list* (- p) q))
   (define (or . ps) ps)
   (define (not p) (- p))
-  (hash-reduce-threading 
-   (lambda (prop dimacsvar num-clauses)
+  (hash-reduce
+   (lambda (prop dimacsvar)
      (match prop
-       [`(: ,sym ,τ) ;; ground proposition. Not in clause.
-        (values '() num-clauses)]
-       [`(not ,sym) 
-        (error "[Internal error] Naked NOT should not survive shredding.")]
-       [`(implies ,p ,q)
-        (values (list (implies dimacsvar (not p) q)
-                      (implies q dimacsvar)
-                      (or dimacsvar p))
-                (+ 3 num-clauses))]
-       [`(and ,ps ...)
-        ;; and gate is true iff all of ps are true
-        (let-values ([(andlits) (map - ps)]
-                      [(impclauses num-clauses)
-                       (map-threading (lambda (p num-clauses)
-                                        (values (implies dimacsvar p)
-                                                (+ 1 num-clauses)))
-                                      (+ 1 num-clauses)
-                                      ps)])
-          (values (cons (cons dimacsvar andlits) ; ~andgate => (not (and ,@ps))
-                        impclauses) ; for all p in ps, andgate => p
-                  num-clauses))]
-       [`(or ,ps ...) 
-        ;; or gate is true iff one of ps is true.
-        (let-values ([(impclauses num-clauses)
-                       (map-threading (lambda (p num-clauses)
-                                        (values (implies p dimacsvar)
-                                                (+ 1 num-clauses)))
-                                      (+ 1 num-clauses)
-                                      ps)])
-          (values (list* (implies* dimacsvar ps) ; orgate => p1 or p2 or ... 
-                         impclauses) ; for all p in ps, p => orgate
-                  num-clauses))]))
-   append '() 0 env))
+            [`(not ,sym)
+             (error "[Internal error] Naked NOT should not survive shredding.")]
+            [`(implies ,p ,q)
+             (set-box! num-clauses (+ 3 (unbox num-clauses)))
+             (list (implies dimacsvar (not p) q)
+                   (implies q dimacsvar)
+                   (or dimacsvar p))]
+            [`(and ,ps ...)
+             ;; and gate is true iff all of ps are true
+             (let ([andlits (map - ps)]
+                   [impclauses (map (lambda (p)
+                                      (incbox! num-clauses)
+                                      (implies dimacsvar p))
+                                    ps)])
+               (incbox! num-clauses)
+               (cons (cons dimacsvar andlits) ; ~andgate => (not (and ,@ps))
+                     impclauses))]     ; for all p in ps, andgate => p
+            [`(or ,ps ...)
+             ;; or gate is true iff one of ps is true.
+             (let ([impclauses (map (lambda (p)
+                                      (incbox! num-clauses)
+                                      (implies p dimacsvar))
+                                    ps)])
+               (incbox! num-clauses)
+               (list* (implies* dimacsvar ps) ; orgate => p1 or p2 or ...
+                      impclauses))]     ; for all p in ps, p => orgate
+            [other ;; ground proposition. Not in clause.
+             '()]))
+   append '() env))
 
-
-; prop->cnf : Prop -> CNF * Assoc<Pos to atomic Prop> * Hash<Prop, Pos>
-(define (prop->cnf prop)
-  (let ((simp-prop (simplify-prop prop)))
+; prop->cnf : Prop -> CNF * T-State
+(define (prop->cnf initialize-t-state prop)
+  (let ((simp-prop (remove-prop-booleans prop)))
     (match simp-prop
-      [#t (values #t (make-hash) (λ (d) '()))]
-      [#f (values #f (make-hash) (λ (d) '()))]
+      [#t (values #t (initialize-t-state (make-hash)))]
+      [#f (values #f (initialize-t-state (make-hash)))]
       [non-trivial
-       (let*-values ([(top-sym total-vars env) (shred non-trivial)]
-                     [(cnf total-clauses) (wff-hash->cnf env)]
-		     [(atomic-propositions)
-		      ;; collect all theory literals in a dictionary keyed 
-		      ;; by their propositional variable.
-		      ;; OT-theory specific!
-		      (hash-foldr
-		       (λ (prop dimacs-lit atomic-assoc)
-			  (match prop
-				 [`(: ,var ,type)
-				  (dict-set atomic-assoc dimacs-lit (T-Lit var type dimacs-lit #f))]
-				 [else atomic-assoc]))
-		       '()
-		       env)])
-	 (values (list (+ -1 total-vars) ; one too many due to needing fresh names
-                       (+ 1 total-clauses) ; add 1 for top level assertion
+       (let* ([env (make-hash)]
+              [total-vars (box 1)] ;; start variables at 1 since 0 can't be negated
+              [total-clauses (box 0)] ;; start with 0 clauses and count upwards
+              [top-sym (shred non-trivial total-vars env)]
+              [cnf (wff-hash->cnf env total-clauses)]
+              [atomic-propositions
+               ;; collect all theory literals in a dictionary keyed
+               ;; by their propositional variable.
+               (make-immutable-hash
+                (hash-foldr
+                 (λ (prop dimacs-lit atomic-assoc)
+                    ;; dimacs-lit should always be positive for an uninterpreted prop
+                    (if (uninterpreted-prop? prop)
+                        (dict-set atomic-assoc prop dimacs-lit)
+                        atomic-assoc))
+                 '()
+                 env))])
+	 (values (list (sub1 (unbox total-vars)) ; one too many due to needing fresh names
+                       (add1 (unbox total-clauses)) ; add 1 for top level assertion
                        (cons (list top-sym) ; assert the top level
                              cnf))
-                 (initial-t-state atomic-propositions)
-		 (cnf-partial-assignment->prop-partial-assignment atomic-propositions)))])))
-
-(define ((cnf-partial-assignment->prop-partial-assignment atomic-propositions) pa)
-  (map (lambda (dimacs-lit)
-	 (T-Lit-and-±->prop (dict-ref atomic-propositions (dimacs-lit->dimacs-var dimacs-lit))
-			    (dimacs-polarity (first pa))))
-       pa))
-  
-
-; Not only do we need to convert our propositions to CNF, we need to convert
-; our CNF's SAT assignment back to a prop SAT assignment.
-; This is important because we want to have informative error messages.
-; TODO: Good error messages from satisfying assignment  
-
-
-#;
-(define (set-of-sets=? l1 l2)
-  (let* ((list->set (λ (l) (apply set l)))
-         (list-list->set-set (λ (ll) (list->set (map list->set ll))))
-         (set=? (λ (s1 s2) (and (subset s1 s2) (subset s2 s1)))))
-    (set=? (list-list->set-set l1) (list-list->set-set l2))))
-
-(prop->cnf '(and (: s1 τ1) (not (: s2 τ2)) (: s3 τ3)))
-(prop->cnf '(or (: s1 τ1) (not (: s2 τ2)) (: s3 τ3)))
+                 (initialize-t-state atomic-propositions)))])))

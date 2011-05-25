@@ -89,32 +89,32 @@
 ;; should only be called during conflict analysis, once per clause
 ;; XXX: Also for learned clause VSIDS heuristic!
 (define (lemma->lits smt lemma)
-  (let ((lits (cond [(procedure? lemma)
-		     (lemma smt)]
-		    [else (inc-clause-activation! lemma)])))
+  (let-values ([(t-state lits)
+                (cond [(procedure? lemma)
+                       (lemma smt)]
+                      [else (values (SMT-T-State smt) (inc-clause-activation! lemma))])])
     (increase-scores! lits)
-    lits))
+    (values (new-T-State smt t-state)
+            lits)))
 
 (define (inc-literal-activation! literal)
   (set-literal-activation! literal (+ ACTIVITY_INC 
 				      (literal-activation literal))))
 
 (define (increase-scores! literals [idx 0])
-  (if (= idx (vector-length literals))
-      (void)
-      (begin (inc-literal-activation! (vector-ref literals idx))
-	     (increase-scores! literals (+ 1 idx)))))
+  (unless (= idx (vector-length literals))
+          (begin (inc-literal-activation! (vector-ref literals idx))
+                 (increase-scores! literals (+ 1 idx)))))
 
 ; slash-all-literals!: Vector<var> -> unit
 ; Exponentially decay activation of all literals. For VSIDS heuristic
 (define (slash-all-literals! variables)
   (let walk ((idx 0))
-    (if (= idx (vector-length variables))
-	(void)
-	(let ((var (vector-ref variables idx)))
-	  (begin (set-var-pos-activation! var (/ (var-pos-activation var) ACTIVITY_DROPOFF))
-		 (set-var-neg-activation! var (/ (var-neg-activation var) ACTIVITY_DROPOFF))
-		 (walk (+ 1 idx)))))))
+    (unless (= idx (vector-length variables))
+            (let ((var (vector-ref variables idx)))
+              (begin (set-var-pos-activation! var (/ (var-pos-activation var) ACTIVITY_DROPOFF))
+                     (set-var-neg-activation! var (/ (var-neg-activation var) ACTIVITY_DROPOFF))
+                     (walk (+ 1 idx)))))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Functions for manipulating literals for 2-watched literal heuristic

@@ -5,6 +5,7 @@
 	 "learned-clauses.rkt"
 	 "statistics.rkt"
 	 "sat-heuristics.rkt"
+         "heuristic-constants.rkt"
 	 "smt-interface.rkt"
 	 "dimacs.rkt"
 	 "debug.rkt")
@@ -62,22 +63,10 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Learning from the T-solver
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-(define (vars->clause-of-not-and vars)
-  (let* ((negate-assigned
-	  (map (lambda (v)
-		 (literal v (not (var-value v))))
-		 vars))
-	 (clause-list (list->vector negate-assigned)))
-  (clause clause-list
-	  (vector-ref clause-list 0)
-	  (vector-ref clause-list (+ -1 (vector-length clause-list))))))
-
-(define (not-partial-assignment smt)
-  (vars->clause-of-not-and (filter-not var-unassigned? 
-				       (vector->list (SMT-variables smt)))))
 
 (define (get-T-solver-blessing smt)
-  (let ((consistent ((T-Consistent?) (SMT-T-State smt) +inf.0)))
+  (let*-values  ([(t-state consistent) ((T-Consistent?) (SMT-T-State smt) +inf.0)]
+                 [(smt) (new-T-State smt t-state)])
     (match consistent
       [#t (raise (sat-exn smt))] ;; got the blessing
       [#f ;; most unhelpful. We have to learn the negation of the current PA
@@ -104,32 +93,37 @@
 ; vsids : SMT -> Literal
 (define (vsids smt)
   (let ((vars (SMT-variables smt)))
-    (let keep-looking ((idx 0) (candidate #f) (best -1))
-      (if (idx . < . (vector-length vars))
-	  (let* ((var (vector-ref vars idx))
-		 (score (+ (var-pos-activation var)
-			   (var-neg-activation var))))
-	    (if (var-unassigned? var)
-		(cond [(score . > .  best)
-		       (keep-looking (+ 1 idx) var score)]
-		      [(= score best)
-		       (if (= 0 (random 2))
-			   (keep-looking (+ 1 idx) var score)
-			   (keep-looking (+ 1 idx) candidate score))]
-		      [else (keep-looking (+ 1 idx) candidate best)])
-		(keep-looking (+ 1 idx) candidate best)))
-	  (if (not candidate)
-	      ;; no candidates for assigning. We're done if T-solver says so.
-	      (get-T-solver-blessing smt)
-	      ;; Found the best candidate!
-	      (cond [((var-pos-activation candidate)
-		      . > . 
-		      (var-neg-activation candidate))
-		     (literal candidate #t)]
-		    [(= (var-pos-activation candidate) 
-			(var-neg-activation candidate))
-		     (literal candidate (= 0 (random 2)))]
-		    [else (literal candidate #f)]))))))
+    (if ((random) . < . RANDOM_DECISION_COEFFICIENT)
+        (choose-random-unassigned-literal smt vars)
+        (vsids-search smt vars 0 #f -1))))
+
+(define (choose-random-unassigned-literal smt vars)
+  (let ((unassigned (vector-filter var-unassigned? vars)))
+    (if (zero? (vector-length unassigned))
+        (raise (sat-exn smt))
+        (literal (vector-ref unassigned (random (vector-length unassigned)))
+             (= 0 (random 2))))))
+
+;; vsids-search : Index * Option var * Integer -> Literal
+(define (vsids-search smt vars idx candidate best)
+  (if (idx . < . (vector-length vars))
+      (let* ((var (vector-ref vars idx))
+             (score (+ (var-pos-activation var)
+                       (var-neg-activation var))))
+        (if (var-unassigned? var)
+            (cond [(score . > .  best)
+                   (vsids-search smt vars (+ 1 idx) var score)]
+                  [else (vsids-search smt  vars (+ 1 idx) candidate best)])
+            (vsids-search smt vars (+ 1 idx) candidate best)))
+      (if (not candidate)
+          ;; no candidates for assigning. We're done if T-solver says so.
+          (get-T-solver-blessing smt)
+          ;; Found the best candidate!
+          (cond [((var-pos-activation candidate)
+                  . > . 
+                  (var-neg-activation candidate))
+                 (literal candidate #t)]
+                [else (literal candidate #f)]))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Solver core

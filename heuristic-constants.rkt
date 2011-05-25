@@ -19,3 +19,5 @@
 (define RESTART_INITIAL_THRESHOLD 100)
 ;; Coefficient for its two geometric sequences
 (define RESTART_COEFFICIENT 1.5)
+;; Cryptominisat decision policy
+(define RANDOM_DECISION_COEFFICIENT 0.05)

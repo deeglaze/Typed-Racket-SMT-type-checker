@@ -4,16 +4,16 @@
          "proof-forest.rkt"
          rackunit)
 
-(provide merge equality-holds?)
+(provide merge equality-holds? explain-complexEQ)
 
-;; Disgustingly mutation-heavy, but hopefully it makes more sense
-;; than the Nieuwenhuis & Oliveras paper.
+;; Less mutation, so hopefully it makes more sense than
+;; the Nieuwenhuis & Oliveras paper.
 
 (define (merge t-state s=t)
   (match s=t
     [(ConstEQ a b)
      (propagate t-state s=t)]
-    [(CurriedEQ a₁ a₂ a a-lit)
+    [(CurriedEQ a₁ a₂ a)
      (let* ([a₁′ (get-representative t-state a₁)]
             [a₂′ (get-representative t-state a₂)]
             [res (get-lookup t-state a₁′ a₂′)])
@@ -37,10 +37,13 @@
                               (length (get-class t-state b′)))
                           (values a a′ b b′ equality)
                           (values b b′ a a′ (flip-equality equality)))])
-          (add-explanation! t-state a b equality)
-          (seq/EUF-state t-state
-                         (union-equalities t-state a′ b′)
-                         (change-uses t-state a′ b′))))))
+          (seq/EUF-state
+           t-state
+           (set-EUF-state-proof
+            t-state
+            (add-explanation (EUF-state-proof t-state) a b equality))
+           (union-equalities t-state a′ b′)
+           (change-uses t-state a′ b′))))))
 
 ;; lines 17-19 of the paper's pseudocode
 (define (union-equalities t-state a′ b′) ;; Returns EUF-state
@@ -58,7 +61,7 @@
              [pending '()])
     (if (empty? auses)
         (seq/EUF-state t-state
-                       (bthash-set (EUF-state-uses tstate) a′ '())
+                       (bthash-set (EUF-state-uses t-state) a′ '())
                        (for/EUF-state t-state ([equality pending])
                          (propagate t-state equality)))
         (let* ([ceq (car auses)]
@@ -68,22 +71,37 @@
           (if (CurriedEQ? lookup)
               (loop t-state
                     (cdr auses)
-                    (cons (EQpair (CurriedEQ c₁ c₂ c c-lit) lookup)
+                    (cons (EQpair (CurriedEQ c₁′ c₂′ (CurriedEQ-a ceq)) lookup)
                           pending))
               (seq/EUF-state t-state
                              (set-lookup t-state c₁′ c₂′ ceq)
                              (add-to-uses t-state b′ ceq)
                              (loop t-state (cdr auses) pending)))))))
 
+(define (explain-complexEQ t-state equality)
+  (if (ConstEQ? equality)
+      (values t-state
+              (explain (EUF-state-eqlit t-state)
+                       (EUF-state-proof t-state)
+                       equality))
+      (let* ([tmp-tv (EUF-state-tmp-tv t-state)] ;; need a fresh TVar
+             [t-state (merge t-state (CurriedEQ (CurriedEQ-g equality)
+                                                (CurriedEQ-arg equality)
+                                                tmp-tv))])
+        (values (set-EUF-state-tmp-tv t-state (add1 tmp-tv))
+                (explain (EUF-state-eqlit t-state)
+                         (EUF-state-proof t-state)
+                         (ConstEQ tmp-tv (CurriedEQ-a equality)))))))
+
 ;; This function has been adapted from are-congruent? from the original paper.
 ;; It instead works on our internal data structures.
 ;; (U ConstEQ CurriedEQ) → Boolean
 (define (equality-holds? t-state equality)
   (match equality
-    [(ConstEQ a b lit)
+    [(ConstEQ a b)
      (eqv? (get-representative t-state a)
            (get-representative t-state b))]
-    [(CurriedEQ a₁ a₂ b lit) ;; f(a₁,a₂) = b
+    [(CurriedEQ a₁ a₂ b) ;; f(a₁,a₂) = b
      (let ([lookup (get-lookup t-state
                                (get-representative t-state a₁)
                                (get-representative t-state a₂))])
@@ -99,21 +117,21 @@
 ;; for handling size bias in WLOG setting.
 (define (flip-equality equality)
   (match equality
-    [(ConstEQ a b lit)
-     (ConstEQ b a lit)]
-    [(EQpair (CurriedEQ a₁ a₂ a a-lit)
-             (CurriedEQ b₁ b₂ b b-lit))
-     (EQpair (CurriedEQ b₁ b₂ b b-lit)
-             (CurriedEQ a₁ a₂ a a-lit))]
+    [(ConstEQ a b)
+     (ConstEQ b a)]
+    [(EQpair (CurriedEQ a₁ a₂ a)
+             (CurriedEQ b₁ b₂ b))
+     (EQpair (CurriedEQ b₁ b₂ b)
+             (CurriedEQ a₁ a₂ a))]
     [other (error "flip-equality: Internal invariant violated ~a" other)]))
 
 ;; Get what the equality is standing for.
 (define (E→a×b equality)
   (match equality
-    [(ConstEQ a b lit)
+    [(ConstEQ a b)
      (values a b)]
-    [(EQpair (CurriedEQ a₁ a₂ a a-lit)
-             (CurriedEQ b₁ b₂ b b-lit))
+    [(EQpair (CurriedEQ a₁ a₂ a)
+             (CurriedEQ b₁ b₂ b))
      (values a b)]
     [other (error "E→a×b: Internal invariant violated ~a" other)]))
 
@@ -157,6 +175,6 @@
 (define (get-representative t-state tvar)
   (bthash-ref (EUF-state-representative t-state) tvar))
 
-(define (set-representative t-state tvar)
+(define (set-representative t-state tvar b′)
   (set-EUF-state-representative t-state
     (bthash-set (EUF-state-representative t-state) tvar b′)))
