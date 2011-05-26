@@ -65,16 +65,11 @@
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
 (define (get-T-solver-blessing smt)
-  (let*-values  ([(t-state consistent) ((T-Consistent?) (SMT-T-State smt) +inf.0)]
-                 [(smt) (new-T-State smt t-state)])
-    (match consistent
-      [#t (raise (sat-exn smt))] ;; got the blessing
-      [#f ;; most unhelpful. We have to learn the negation of the current PA
-       (debug "inconsistent" (not-partial-assignment smt))
-       (resolve-conflict! smt (not-partial-assignment smt))]
-      [explanation ;; Have an explanation of inconsistency.
-       (resolve-conflict! smt (vars->clause-of-not-and explanation))])))
-
+  (let*-values ([(t-state consistent) ((T-Consistent?) (SMT-T-State smt) +inf.0)]
+                [(smt) (new-T-State smt t-state)]
+                ;; continue past this and we have a true satisfying assignment
+                [(smt) (resolve!-or-continue smt t-state consistent)])
+    (raise (sat-exn smt))))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Literal choice functions
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -92,7 +87,7 @@
 
 ; vsids : SMT -> Literal
 (define (vsids smt)
-  (let ((vars (SMT-variables smt)))
+  (let ([vars (SMT-variables smt)])
     (if ((random) . < . RANDOM_DECISION_COEFFICIENT)
         (choose-random-unassigned-literal smt vars)
         (vsids-search smt vars 0 #f -1))))
@@ -100,21 +95,21 @@
 (define (choose-random-unassigned-literal smt vars)
   (let ((unassigned (vector-filter var-unassigned? vars)))
     (if (zero? (vector-length unassigned))
-        (raise (sat-exn smt))
+        (get-T-solver-blessing smt)
         (literal (vector-ref unassigned (random (vector-length unassigned)))
              (= 0 (random 2))))))
 
 ;; vsids-search : Index * Option var * Integer -> Literal
 (define (vsids-search smt vars idx candidate best)
   (if (idx . < . (vector-length vars))
-      (let* ((var (vector-ref vars idx))
-             (score (+ (var-pos-activation var)
-                       (var-neg-activation var))))
+      (let* ([var (vector-ref vars idx)]
+             [score (+ (var-pos-activation var)
+                       (var-neg-activation var))])
         (if (var-unassigned? var)
             (cond [(score . > .  best)
-                   (vsids-search smt vars (+ 1 idx) var score)]
-                  [else (vsids-search smt  vars (+ 1 idx) candidate best)])
-            (vsids-search smt vars (+ 1 idx) candidate best)))
+                   (vsids-search smt vars (add1 idx) var score)]
+                  [else (vsids-search smt  vars (add1 idx) candidate best)])
+            (vsids-search smt vars (add1 idx) candidate best)))
       (if (not candidate)
           ;; no candidates for assigning. We're done if T-solver says so.
           (get-T-solver-blessing smt)
@@ -137,7 +132,7 @@
 
 ;; do the decision loop
 (define (smt-search smt [choose-literal vsids])
-  (let keep-solving ((smt (initial-bcp smt)))
+  (let keep-solving ([smt smt #;(initial-bcp smt)])
     (keep-solving 
      (with-handlers
       ;; if propagate-assignment backjumps, we do nothing. 

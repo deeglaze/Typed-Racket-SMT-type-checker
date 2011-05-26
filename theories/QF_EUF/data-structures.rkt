@@ -80,20 +80,22 @@
 ;; hash is first, then second most recent, etc.
 
 (define (aged-hash-ref ahash key [failure #f])
-  (hash-ref (aged-hash-hash hash) key failure))
+  (hash-ref (aged-hash-hash ahash) key failure))
 (define (aged-hash-has-key? ahash key)
-  (hash-has-key? (aged-hash-hash hash) key))
+  (hash-has-key? (aged-hash-hash ahash) key))
 (define (aged-hash-set ahash key value)
-  (set-aged-hash-hash ahash (hash-set (aged-hash-hash hash) key value)))
+  (set-aged-hash-hash ahash (hash-set (aged-hash-hash ahash) key value)))
 
 ;; We just want the most recent value for the given key
-(define (bthash-ref bthash key)
-  (and (pair? bthash)
-       (aged-hash-ref (car bthash) key)))
+(define (bthash-ref bthash key [failure #f])
+  (if (pair? bthash)
+      (aged-hash-ref (car bthash) key failure)
+      failure))
 
 ;; INVARIANT: (pair? bthash)
 (define (bthash-set bthash key value)
-  (aged-hash-set (car bthash) key value))
+  (cons (aged-hash-set (car bthash) key value)
+        (cdr bthash)))
 
 (define (bthash-iterate-first bthash)
   (and (pair? bthash)
@@ -108,11 +110,13 @@
 
 ;; remove all ahashes with timestamp >= given timestamp
 (define (bthash-backtrack-to bthash timestamp)
-  (memf (λ (ahash) (< (aged-hash-timestamp ahash) timestamp)) bthash))
+  (or (memf (λ (ahash) (< (aged-hash-timestamp ahash) timestamp)) bthash)
+      ;; everything is wiped out.
+      '()))
 
 ;; INVARIANT: (empty? bthash) or (> timestamp (aged-hash-timestamp (car bthash)))
 (define (bthash-new-age bthash timestamp)
   (if (empty? bthash)
-      (list (aged-hash timestamp (make-immutable-hash)))
+      (list (aged-hash timestamp (make-immutable-hash '())))
       (cons (aged-hash timestamp (aged-hash-hash (car bthash)))
             bthash)))

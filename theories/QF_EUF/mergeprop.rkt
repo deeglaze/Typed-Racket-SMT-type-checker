@@ -22,7 +22,8 @@
            (seq/EUF-state t-state
                           (set-lookup t-state a₁′ a₂′ s=t)
                           (add-to-uses t-state a₁′ s=t)
-                          (add-to-uses t-state a₂′ s=t))))]))
+                          (add-to-uses t-state a₂′ s=t))))]
+    [other (error "merge fail ~a" other)]))
 
 (define (propagate t-state equality)
   (let*-values ([(a b) (E→a×b equality)]
@@ -61,7 +62,7 @@
              [pending '()])
     (if (empty? auses)
         (seq/EUF-state t-state
-                       (bthash-set (EUF-state-uses t-state) a′ '())
+                       (set-EUF-state-uses t-state (bthash-set (EUF-state-uses t-state) a′ '()))
                        (for/EUF-state t-state ([equality pending])
                          (propagate t-state equality)))
         (let* ([ceq (car auses)]
@@ -102,13 +103,14 @@
      (eqv? (get-representative t-state a)
            (get-representative t-state b))]
     [(CurriedEQ a₁ a₂ b) ;; f(a₁,a₂) = b
-     (let ([lookup (get-lookup t-state
-                               (get-representative t-state a₁)
-                               (get-representative t-state a₂))])
+     (let* ([a₁′ (get-representative t-state a₁)]
+            [a₂′ (get-representative t-state a₂)]
+            [lookup (get-lookup t-state a₁′ a₂′)])
        ;; If lookup fails, we know nothing about f(a₁′,a₂′), so it can't possibly be b′.
        (and (CurriedEQ? lookup)
             (eqv? (get-representative t-state (CurriedEQ-a lookup))
-                  (get-representative t-state b))))]))
+                  (get-representative t-state b))))]
+    [other (error 'equality-holds? "fail ~a" other)]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Getters/setters follow. Uninteresting.
@@ -137,7 +139,7 @@
 
 ;; Manage the classes table
 (define (get-class t-state rep)
-  (bthash-ref (EUF-state-classes t-state) rep))
+  (bthash-ref (EUF-state-classes t-state) rep '()))
 
 (define (add-to-class t-state rep tvar)
   (set-EUF-state-classes t-state
@@ -161,7 +163,7 @@
 
 ;; Manage the uses table
 (define (get-uses t-state representative)
-  (bthash-ref (EUF-state-uses t-state) representative))
+  (bthash-ref (EUF-state-uses t-state) representative '()))
 
 (define (add-to-uses t-state representative equality)
   (set-EUF-state-uses t-state
@@ -173,7 +175,13 @@
 
 ;; Manage the representative table
 (define (get-representative t-state tvar)
-  (bthash-ref (EUF-state-representative t-state) tvar))
+  ;; If unset, then tvar not in another other equivalence class than its own.
+  ;; In that case, return itself
+  (let ([res
+  (bthash-ref (EUF-state-representative t-state) tvar tvar)])
+    (if res
+        res
+        (error "rep is false! " tvar))))
 
 (define (set-representative t-state tvar b′)
   (set-EUF-state-representative t-state

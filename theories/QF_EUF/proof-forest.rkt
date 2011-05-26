@@ -17,23 +17,26 @@
                 [(proof) (reverse-path-to-root proof start)])
     (add-edge proof start end label)))
 
-;; Node * Node -> Node
-(define (least-common-ancestor a b)
-  (let ([aseen (make-hash)]
+;; TVar * TVar -> Node
+(define (least-common-ancestor proof a b)
+  (let ([aseen (make-hash)] ;; Node ↦ Boolean
         [bseen (make-hash)])
-    (let loop ([anode a]
-               [bnode b]
+    (let loop ([a a]
+               [b b]
                [b-next #f]) ;; #f if a next, #t if b next
-      (let-values ([(key hash anode bnode)
-                    (if b-next
-                        (values b aseen anode (Node-next bnode))
-                        (values a bseen (Node-next anode) bnode))])
-        (if (hash-has-key? hash key)
-            key
-            (if key
-                (begin (hash-set! hash key #t)
-                       (loop anode bnode (not b-next)))
-                (error "LCA: not in same eqv class ~a ~a" a b)))))))
+      (if (eqv? a b)
+          a
+          (let*-values ([(anode) (bthash-ref proof a)]
+                        [(bnode) (bthash-ref proof b)]
+                        [(key hash a b)
+                         (if b-next
+                             (values b aseen a (Node-next bnode))
+                             (values a bseen (Node-next anode) b))])
+            (cond [(hash-has-key? hash key) key]
+                  [key
+                   (hash-set! hash key #t)
+                   (loop proof a b (not b-next))]
+                  [else (error 'LCA "not in same eqv class" a b)]))))))
 
 (define (explain eqlit proof consteq)
   (explain-aux eqlit proof (instantiate union-find% ()) consteq))
@@ -41,7 +44,7 @@
 (define (explain-aux eqlit proof UF consteq)
   (let* ([a (ConstEQ-a₁ consteq)]
          [b (ConstEQ-a₂ consteq)]
-         [ab-lca (least-common-ancestor a b)])
+         [ab-lca (least-common-ancestor proof a b)])
     (append (explain-along-path eqlit proof UF a ab-lca)
             (explain-along-path eqlit proof UF b ab-lca))))
 
@@ -52,7 +55,8 @@
     (if (eqv? a c)
         (for/list ([consteq pending]) ;; explain the rest
           (explain-aux eqlit proof UF pending))
-        (let* ([anode (bthash-ref proof a)]
+        (let* ([anode (bthash-ref proof a
+                                  (λ () (error 'explain-along-path "Node should have explanation" a)))]
                [b (Node-next anode)])
           (send UF union a b) ;; a and b have a common ancestor, thus equal.
           (match (Node-outlabel anode)
@@ -67,7 +71,8 @@
                     (loop (list* (ConstEQ a₁ c₁) ;; explain the extentional equality.
                                  (ConstEQ a₂ c₂)
                                  pending)
-                          (send UF find b)))])))))
+                          (send UF find b)))]
+            [other (error "explain-along-path fail ~a" other)])))))
 #|
 This next mutation heavy function has a trick to it. We need to
 maintain the invariant that (Node-size node) = # children of node.

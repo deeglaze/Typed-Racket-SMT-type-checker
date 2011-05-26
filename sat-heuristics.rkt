@@ -51,14 +51,18 @@
   (new-SAT (SAT-set-learned-clauses (SMT-sat smt) val)))
 
 ;; currently stateful. Might change later, so keep interface
-(define (learn-clause sat learned-clause)
+(define (learn-clause! sat learned-clause)
   (add-learned-clause! (SAT-learned-clauses sat)
 		       learned-clause))
-(define (SMT-learn-clause smt clause)
+
+(define (SMT-learn-clause smt lits watch1 watch2)
   ;; shadowing... ick.
-  (let ((learned-clause (learned-clause clause INITIAL_ACTIVITY #f)))
-    (learn-clause (SMT-sat smt) learned-clause)
-    (values smt learned-clause)))
+  (let ([pre-learned (clause lits watch1 watch2)])
+    (begin (add-literal-watched! pre-learned watch1)
+           (add-literal-watched! pre-learned watch2)
+           (let ([learned (learned-clause pre-learned INITIAL_ACTIVITY #f)])
+             (learn-clause! (SMT-sat smt) (learned-clause pre-learned INITIAL_ACTIVITY #f))
+             (values smt learned)))))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Functions for manipulating literals/clauses for VSIDS heuristic

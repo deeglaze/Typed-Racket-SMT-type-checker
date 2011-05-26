@@ -1,6 +1,6 @@
 #lang racket
 
-(provide prop->cnf bconn? hash-foldr)
+(provide prop->cnf bconn? hash-foldr single-ify)
 
 ; A Boolean connective (bconn) is
 (define (bconn? x) (memq x '(or and not implies)))
@@ -25,6 +25,11 @@
   (not (or (boolean? x)
            (and (pair? x)
                 (bconn? (car x))))))
+
+(define (single-ify bconn base lst)
+  (cond [(empty? lst) base]
+        [(empty? (cdr lst)) (car lst)]
+        [else (cons bconn lst)]))
 
 (define (remove-prop-booleans prop)
   (match prop
@@ -53,14 +58,14 @@
               #f]
              [else (let ([rprops-no-t (remove* (list #t) rprops)])
                      (or (empty? rprops-no-t)
-                         rprops-no-t))]))]
+                         (single-ify 'and #t rprops-no-t)))]))]
     [`(or ,props ...)
      (let ([rprops (map remove-prop-booleans props)])
        (cond [(memq #t rprops)
               #t]
              [else (let ([rprops-no-f (remove* (list #f) rprops)])
                      (and (pair? rprops-no-f)
-                          rprops-no-f))]))]
+                          (single-ify 'or #f rprops-no-f)))]))]
     [other other]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -103,14 +108,13 @@
        (- (shredrec p))]
       [`(,(? bconn? op) ,ps ...)
        (let ([d1props (map shredrec ps)])
-         (printf "hi~%")
          (begin0 (hash-ref! env (cons op d1props) (unbox varnum))
                  (incbox! varnum)))]
       [(? boolean? x)
        (error "[Internal error] Literal false or true found!")]
       [other ;; intepreted
-       (incbox! varnum)
-       (hash-ref! env p (unbox varnum))])))
+       (begin0 (hash-ref! env p (unbox varnum))
+               (incbox! varnum))])))
 
 ;; Tseitin transform depth1props to Dimacs format.
 ;; This means counting the number of clauses created.

@@ -46,7 +46,7 @@
                      [arity-dict (dict-set!-many (make-hash) Xs arities)]
                      [tvar-count (box 0)]
                      [φ* ((φ→formula-sexp tvar-count term-dict arity-dict) φ)])
-                (printf "Term-dict ~a~%" term-dict)
+                (printf "Term-dict ~a~%φ* ~a~%" term-dict φ*)
                 (prop->cnf (EUF-initializer arity-dict (unbox tvar-count))
                           φ*))]))]
     [other
@@ -55,12 +55,12 @@
 (define (EUF-initializer arity-dict tmp-tv)
   (λ (sexp↦dimacslit)
      (printf "sexp↦dimacslit ~a~%" sexp↦dimacslit)
-     (EUF-state (extract-euf-lits sexp↦dimacslit arity-dict)
+     (EUF-state (extract-euf-lits sexp↦dimacslit arity-dict) ;; lit -> equality
                 0 ;; sat-level
                 0 ;; last-consistency-check
                 tmp-tv
                 #f ;; last-sat
-                '() ;; eqlit
+                '() ;; eqlit (equality -> Option Lit)
                 '() ;; backjump-table
                 '() ;; representative
                 '() ;; classes
@@ -73,7 +73,7 @@
    (hash-foldr
     (λ (sexp dimacslit new-dict)
        (if (internal-eq? sexp)
-           (dict-set new-dict sexp dimacslit)
+           (dict-set new-dict dimacslit sexp)
            new-dict))
     '()
     sexp↦dimacslit)))
@@ -100,17 +100,21 @@
   (let*-values ([(t₁′ φs) (term→depth2 tvar-count term-dict arities t₁)]
                 [(t₂′ ψs) (term→depth2 tvar-count term-dict arities t₂)]
                 [(t₂″) (term-lookup term-dict tvar-count t₂′)]) ;; apply(g,a) → 1
-    `(and ,@φs ,@ψs
-          ,(if (App? t₁′)
-               (CurriedEQ (App-f t₁′) (App-arg t₁′) t₂″)
-               (ConstEQ t₁′ t₂″)))))
+    (printf "(= ~a ~a) is ~a~%" t₁ t₂ (single-ify 'and #t (cons (if (App? t₁′)
+                                                                    (CurriedEQ (App-f t₁′) (App-arg t₁′) t₂″)
+                                                                    (ConstEQ t₁′ t₂″))
+                                                                (append φs ψs))))
+    (single-ify 'and #t (cons (if (App? t₁′)
+                                  (CurriedEQ (App-f t₁′) (App-arg t₁′) t₂″)
+                                  (ConstEQ t₁′ t₂″))
+                              (append φs ψs)))))
 
 ;; (g a b c) → apply(apply(apply(g,a),b),c)
 (define (term→depth2 tvar-count term-dict arities t)
   (flatten-subterms tvar-count term-dict ((curryfy arities) t)))
 
 (define (term-lookup term-dict tvar-count sym-or-num)
-  (if (integer? sym-or-num)
+  (if (integer? sym-or-num) ;; already given a number
       sym-or-num
       (hash-ref! term-dict sym-or-num
                  (λ () (let ([val (unbox tvar-count)])
