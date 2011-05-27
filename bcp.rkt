@@ -11,12 +11,12 @@
 	 rackunit)
 
 (provide propagate-assignment
-	 initial-bcp
+	 #;initial-bcp
 	 obliterate-lit!
          resolve!-or-continue)
 
 ;bcp-clause : Clause -> SMT
-(define (bcp-clause smt clause)
+#;(define (bcp-clause smt clause)
   (if (and (literal-eq? (clause-watched1 clause) (clause-watched2 clause))
            (literal-unassigned? (clause-watched1 clause)))
       (propagate-assignment smt (clause-watched1 clause) clause)
@@ -24,7 +24,7 @@
 
 ; initial-bcp : SMT -> SMT
 ; Make sure we learn assignments from length 1 clauses in the beginning.
-(define (initial-bcp smt)
+#;(define (initial-bcp smt)
   (let ([clauses (SMT-clauses smt)])
     (let recur ([smt smt]
 		[idx 0])
@@ -113,6 +113,7 @@
 (define (propagate-T-implications smt lit)
   (let-values ([(t-state lits)
                 ((T-Propagate) (SMT-T-State smt) (SMT-strength smt) (literal->dimacs lit))])
+    (debug "T-propagated lits " (literal->dimacs lit) lits)
     (let t-propagate ([smt (new-T-State smt t-state)]
                       [lits lits])
       (if (empty? lits) ;; done propagating
@@ -130,6 +131,7 @@
 (define ((T-Explanation-fn t-state dimacslit) smt)
   (let-values ([(t-state explanation)
                 ((T-Explain) (SMT-T-State smt) (SMT-strength smt) dimacslit)])
+    (debug "T explanation " dimacslit explanation)
     (values t-state
             (clause-literals ((dimacs-lits->clause (SMT-variables smt)))))))
 

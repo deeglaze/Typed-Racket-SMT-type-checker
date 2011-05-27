@@ -15,7 +15,8 @@
 
 ;; Representation structures for arbitrary input formulae:
 
-;; A Term is a Var or an App
+;; A Term is a Var, a Const or an App
+(struct Const (c) #:transparent) ;; c : Any
 (struct Var (x) #:transparent) ;; x : Natural
 (struct App (f arg) #:transparent) ;; f : Symbol, args : Term
 ;; l and r are Terms.
@@ -48,6 +49,7 @@
 ;; The entire theory solver state.
 
 (struct-with-set EUF-state (equalities ;; DimacsVar ↦ Equality
+                            untranslator ;; DimacsLit -> Option S-exp
                             satisfaction-level ;; Natural that gets bumped each T-Satisfy.
                             last-consistency-check ;; satisfaction-level the last T-Consistent? was called
                             tmp-tv ;; Natural (used for flattening intermediate equalities)
@@ -55,7 +57,7 @@
                             ;; the rest of these are backtrackable hash tables
                             eqlit ;; Equality ↦ Option DimacsLit
                             backjump-table ;; Satisfaction-level ↦ DimacsVar
-                            representative ;; TVar ↦ TVar
+                            representative ;; TVar ↦ TVar (if not hashed, then self-represented)
                             classes        ;; TVar ↦ Listof TVar
                             uses           ;; TVar ↦ Listof CurriedEQ
                             lookup         ;; (Pair TVar TVar) ↦ CurriedEQ (Var₁ ≤ Var₂)
@@ -71,11 +73,13 @@
              [x e] ...)
     (if (or (empty? x) ...)
         t-state
-        (loop (seq/EUF-state t-state body ...) (cdr x) ...))))
+        (loop (let ([x (car x)] ...)
+                (seq/EUF-state t-state body ...))
+              (cdr x) ...))))
 
 ;; useful for stacking changes at different satisfaction levels
 ;; to backtrack easily.
-(struct-with-set aged-hash (timestamp hash))
+(struct-with-set aged-hash (timestamp hash) #:transparent)
 ;; A backtrack-hash as a (Listof aged-hash) such that the most recent
 ;; hash is first, then second most recent, etc.
 

@@ -3,6 +3,7 @@
 (require "../../smt-solve.rkt" #;(planet "smt-solve.rkt" ("ianj" "smt-solver.plt" 1 3))
          "../../dimacs.rkt" #;(planet "dimacs.rkt" ("ianj" "smt-solver.plt" 1 3))
          "../../smt-interface.rkt" #;(planet "smt-interface.rkt"  ("ianj" "smt-solver.plt" 1 3))
+         "../../debug.rkt"
          "preprocess.rkt"
          "data-structures.rkt"
          "mergeprop.rkt"
@@ -10,6 +11,9 @@
 
 (define-syntax-rule (implies e e′) (if e e′ #t))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; T-Satisfy
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Bump the satisfaction timestamp and update the appropriate mappings
 (define (qfeuf-satisfy t-state literal)
   (let ([maybe-eq (dict-ref (EUF-state-equalities t-state) (dimacs-lit->dimacs-var literal) #f)])
@@ -20,8 +24,10 @@
 
 ;; update different mappings.
 (define (set-literal t-state equality literal)
+  (debug "Setting ~a~%" literal)
   (let* ([sat-level (add1 (EUF-state-satisfaction-level t-state))]
          [t-state (EUF-state (EUF-state-equalities t-state)
+                             (EUF-state-untranslator t-state)
                              sat-level
                              (EUF-state-last-consistency-check t-state)
                              (EUF-state-tmp-tv t-state)
@@ -40,7 +46,7 @@
                              (bthash-new-age (EUF-state-uses t-state) sat-level)
                              (bthash-new-age (EUF-state-lookup t-state) sat-level)
                              (bthash-new-age (EUF-state-proof t-state) sat-level))])
-    (printf "Literal ~a set ~a~%" literal (aged-hash-hash (car (EUF-state-eqlit t-state))))
+    (debug "Literal ~a set ~a~%" literal (aged-hash-hash (car (EUF-state-eqlit t-state))))
     (if (positive? literal)
         (merge t-state equality) ;; should be an EUF-state
         ;; Not changing anything here is correct, since disequalities can
@@ -48,17 +54,22 @@
         ;; tell us that this was right or wrong.
         t-state)))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; T-Propagate
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define (qfeuf-propagate t-state strength literal)
   ;; the equality has already been merged, so just add unset equalities
+  (debug "Propagate: Eqv classes ~a~%" (EUF-state-classes t-state))
   (values t-state
-          (let loop ([unassigned-eq (unassigned-eqs t-state)])
-            (cond [(empty? unassigned-eq) '()]
-                  [(equality-holds? t-state (car unassigned-eq))
-                    (cons (dict-ref (EUF-state-equalities t-state) (car unassigned-eq))
-                          (loop (cdr unassigned-eq)))]
-                  [else (loop (cdr unassigned-eq))]))))
+          (let loop ([lit-eqs (unassigned-lits t-state)])
+            (cond [(empty? lit-eqs) '()]
+                  [(equality-holds? t-state (cdar lit-eqs))
+                    (cons (caar lit-eqs)
+                          (loop (cdr lit-eqs)))]
+                  [else (loop (cdr lit-eqs))]))))
 
-(define (unassigned-eqs t-state)
+;;-> Listof DimacsVar
+(define (unassigned-lits t-state)
   (let ([edict (EUF-state-equalities t-state)] ;; lit -> equality
         [ldict (EUF-state-eqlit t-state)]) ;; equality -> lit
     (let loop ([itr (dict-iterate-first edict)])
@@ -66,7 +77,8 @@
           ;; collect only unmapped equalities
           (if (bthash-ref ldict (dict-iterate-value edict itr) #f) ;; lit assigned?
               (loop (dict-iterate-next edict itr))
-              (cons (dict-iterate-value edict itr) ;; unassigned. Add EQUALITY.
+              (cons (cons (dict-iterate-key edict itr) ;; unassigned. Add LIT * EQ.
+                          (dict-iterate-value edict itr))
                     (loop (dict-iterate-next edict itr))))
           '()))))
 
@@ -77,6 +89,9 @@
 (define (qfeuf-known-equalities-since t-state sat-level)
   '()) ;; TODO
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; T-Explain
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define (qfeuf-explain t-state strength literal)
   (let ([equality (dict-ref (EUF-state-equalities t-state)
                             (dimacs-lit->dimacs-var literal) #f)])
@@ -84,44 +99,51 @@
         (explain-complexEQ t-state equality)
         (error "EUF-solver: Asked to explain an uninterpreted literal ~a" literal))))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; T-Consistent?
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Disregard strength and do a full consistency check
 (define (qfeuf-consistent? t-state strength)
   (unless (EUF-state? t-state)
           (error "WHAT? NOT EUF-state!!"))
+  (debug "consistent? str ~a~%" strength)
   (if (zero? strength) ;; lightweight check
       (quick-consistent? t-state)
       (let-values  ([(t-state result)
                      (equalities-consistent-since? t-state
                                                    (EUF-state-last-consistency-check t-state))])
-        (printf "Fully consistent? ~a~%" result)
+        (debug "Fully consistent? ~a~%" result)
         (values (set-EUF-state-last-consistency-check t-state (EUF-state-satisfaction-level t-state))
                 result))))
 
 (define (quick-consistent? t-state)
   (let ([last-sat (EUF-state-last-sat t-state)])
     (if last-sat
-        (let-values ([(t-state res) (bad-disequality? t-state last-sat)])
+        (let*-values ([(t-state res) (bad-disequality? t-state last-sat)]
+                      [(t-state) (set-EUF-state-last-sat t-state #f)])
           (if res ;; is bad
               (values t-state res)
               (values t-state #t)))
-        (values t-state #f))))
+        ;; nothing to refute. Consistent.
+        (values t-state #t))))
 
+;; -> #t + DimacsClause
 (define (equalities-consistent-since? t-state sat-level)
   (let ([bjt (EUF-state-backjump-table t-state)])
-    (printf "Consistent-since? ~a~%" sat-level)
+    (debug "Consistent-since? ~a~%" sat-level)
     (let loop ([t-state t-state]
                [itr (bthash-iterate-first bjt)])
       (if itr
           (if (> (bthash-iterate-key bjt itr) sat-level) ;; only check what's new
               (let* ([lit (bthash-iterate-value bjt itr)]
-                     [eq (dict-ref (EUF-state-equalities t-state) (dimacs-lit->dimacs-var lit))])
-                (printf "in range ~a = ~a~%" eq lit)
+                     [eq (dict-ref (EUF-state-equalities t-state) (dimacs-lit->dimacs-var lit) (λ () (error "here2")))])
+                (debug "in range" eq lit)
                 ;; an equality that doesn't hold IS CONSISTENT!
                 ;; We can create a model in which the equality does hold.
                 ;; Only a disequality that doesn't hold is inconsistent.
                 (if (negative? lit)
                     (let-values ([(t-state res) (bad-disequality? t-state eq)])
-                      (printf "Back from bad-dis ~a~%" res)
+                      (debug "Back from bad-dis" res)
                       (if res ;; has an explanation
                           (values t-state res)
                           (loop t-state (bthash-iterate-next bjt itr))))
@@ -130,20 +152,25 @@
               (loop t-state (bthash-iterate-next bjt itr)))
           (values t-state #t)))))
 
+;; -> Option DimacsClause
 (define (bad-disequality? t-state equality)
   (let ([eq-holds? (equality-holds? t-state equality)])
-    (printf "bad-dis: ~a holds? ~a~%" equality eq-holds?)
+    (debug "bad-dis: " equality eq-holds?)
     (if eq-holds?
         (let-values ([(t-state res) (explain-complexEQ t-state equality)])
           (values t-state
-                  (cons (- (bthash-ref (EUF-state-eqlit t-state) equality))
+                  (cons (- (bthash-ref (EUF-state-eqlit t-state) equality (λ () (error "here3"))))
                         (map - res))))
         ;; inconsistent => give explanation
         (values t-state #f))))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; T-Backjump
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 (define (qfeuf-backjump t-state backjump-by-sats)
   (let ([new-satisfaction-level (- (EUF-state-satisfaction-level t-state) backjump-by-sats)])
     (EUF-state (EUF-state-equalities t-state) ;; only thing unchanged.
+               (EUF-state-untranslator t-state)
                new-satisfaction-level
                (min new-satisfaction-level (EUF-state-last-consistency-check t-state))
                (EUF-state-tmp-tv t-state)
@@ -156,9 +183,13 @@
                (bthash-backtrack-to (EUF-state-lookup t-state) new-satisfaction-level)
                (bthash-backtrack-to (EUF-state-proof t-state) new-satisfaction-level))))
 
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; T-Restart
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; A complete backjump to 0. Generally more efficient than a backjump call.
 (define (qfeuf-restart t-state)
   (EUF-state (EUF-state-equalities t-state)
+             (EUF-state-untranslator t-state)
              0 ;; satisfaction-level
              0 ;; last-consistency-check
              (EUF-state-tmp-tv t-state)
@@ -169,8 +200,7 @@
              '() ;; classes
              '() ;; uses
              '() ;; lookup
-             '() ;; proof
-             ))
+             '())) ;; proof
 
 (define (euf-solve φ)
   (parameterize ([T-Satisfy qfeuf-satisfy]
@@ -180,28 +210,14 @@
                  [T-Explain qfeuf-explain]
                  [T-Consistent? qfeuf-consistent?])
     (let-values ([(CNF t-state) (EUF→CNF φ)])
-      (printf "CNF ~a~%" CNF)
-      (smt-assign CNF t-state +inf.0))))
+      (debug "CNF ~a~%" CNF)
+      (filter-map (EUF-state-untranslator t-state)
+                  (smt-assign CNF t-state +inf.0)))))
 
-(printf "~%~%Should be UNSAT~%~%")
-
-(euf-solve '((declare-fun a 0)
-             (formula (not (= a a)))))
-
-(printf "~%~%Should be UNSAT~%~%")
 (euf-solve '((declare-fun a0 0)
              (declare-fun a1 0)
              (declare-fun f 1)
              (formula (not (implies (and (= (f a0) a0)
                                          (= (f a1) a1)
-                                         (= a1 a0))
-                                    (= (f a0) (f a1)))))))
-
-(printf "~%~%Should be SAT~%~%")
-(euf-solve '((declare-fun a0 0)
-             (declare-fun a1 0)
-             (declare-fun f 1)
-             (formula (not (implies (and (= (f a0) a0)
-                                         (= (f a1) a1)
-                                         (= a1 a0))
+                                         (= a0 a1))
                                     (not (= (f a0) (f a1))))))))

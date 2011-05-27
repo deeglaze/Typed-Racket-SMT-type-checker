@@ -133,6 +133,7 @@
              (set-box! num-clauses (+ 3 (unbox num-clauses)))
              (list (implies dimacsvar (not p) q)
                    (implies q dimacsvar)
+                   ;; implication not true => p had to be true.
                    (or dimacsvar p))]
             [`(and ,ps ...)
              ;; and gate is true iff all of ps are true
@@ -160,6 +161,7 @@
 ; prop->cnf : Prop -> CNF * T-State
 (define (prop->cnf initialize-t-state prop)
   (let ((simp-prop (remove-prop-booleans prop)))
+    (printf "Simplified: ~a~%" simp-prop)
     (match simp-prop
       [#t (values #t (initialize-t-state (make-hash)))]
       [#f (values #f (initialize-t-state (make-hash)))]

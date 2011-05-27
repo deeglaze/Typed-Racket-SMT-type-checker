@@ -32,10 +32,10 @@
              (pretty-print (node-antecedent item)))]
     [else item]))
 
-#;(define (debug msg . items)
+(define (debug msg . items)
   (begin (printf "~a: ~a~%" msg (string-join (map (λ (i) (format "~a" i)) (map pretty-print items)) "\n          "))
 	 items))
 
-(define-syntax debug
+#;(define-syntax debug
   (syntax-rules ()
-    [(_ x y) '*void*]))
+    [(_ x . y) '*void*]))

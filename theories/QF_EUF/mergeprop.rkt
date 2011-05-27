@@ -2,6 +2,7 @@
 
 (require "data-structures.rkt"
          "proof-forest.rkt"
+         "../../debug.rkt"
          rackunit)
 
 (provide merge equality-holds? explain-complexEQ)
@@ -23,7 +24,7 @@
                           (set-lookup t-state a₁′ a₂′ s=t)
                           (add-to-uses t-state a₁′ s=t)
                           (add-to-uses t-state a₂′ s=t))))]
-    [other (error "merge fail ~a" other)]))
+    [other (error 'merge "fail" other)]))
 
 (define (propagate t-state equality)
   (let*-values ([(a b) (E→a×b equality)]
@@ -89,6 +90,7 @@
              [t-state (merge t-state (CurriedEQ (CurriedEQ-g equality)
                                                 (CurriedEQ-arg equality)
                                                 tmp-tv))])
+        (debug "New temp introduced: ~a~%" tmp-tv)
         (values (set-EUF-state-tmp-tv t-state (add1 tmp-tv))
                 (explain (EUF-state-eqlit t-state)
                          (EUF-state-proof t-state)
@@ -110,7 +112,7 @@
        (and (CurriedEQ? lookup)
             (eqv? (get-representative t-state (CurriedEQ-a lookup))
                   (get-representative t-state b))))]
-    [other (error 'equality-holds? "fail ~a" other)]))
+    [other (error 'equality-holds? "fail" other)]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Getters/setters follow. Uninteresting.
@@ -125,7 +127,7 @@
              (CurriedEQ b₁ b₂ b))
      (EQpair (CurriedEQ b₁ b₂ b)
              (CurriedEQ a₁ a₂ a))]
-    [other (error "flip-equality: Internal invariant violated ~a" other)]))
+    [other (error "flip-equality: Internal invariant violated" other)]))
 
 ;; Get what the equality is standing for.
 (define (E→a×b equality)
@@ -135,20 +137,18 @@
     [(EQpair (CurriedEQ a₁ a₂ a)
              (CurriedEQ b₁ b₂ b))
      (values a b)]
-    [other (error "E→a×b: Internal invariant violated ~a" other)]))
+    [other (error "E→a×b: Internal invariant violated" other)]))
 
 ;; Manage the classes table
 (define (get-class t-state rep)
-  (bthash-ref (EUF-state-classes t-state) rep '()))
+  (bthash-ref (EUF-state-classes t-state) rep (list rep)))
 
 (define (add-to-class t-state rep tvar)
   (set-EUF-state-classes t-state
                          (bthash-set
                           (EUF-state-classes t-state)
                           rep
-                          (cons tvar (bthash-ref
-                                      (EUF-state-classes t-state)
-                                      rep)))))
+                          (nodup-cons tvar (get-class t-state rep)))))
 
 ;; Manage the lookup table
 (define (get-lookup t-state rep₁ rep₂)
@@ -169,9 +169,8 @@
   (set-EUF-state-uses t-state
     (bthash-set (EUF-state-uses t-state)
                 representative
-                (cons equality
-                      (bthash-ref (EUF-state-uses t-state)
-                                  representative)))))
+                (nodup-cons equality
+                            (get-uses t-state representative)))))
 
 ;; Manage the representative table
 (define (get-representative t-state tvar)
@@ -181,8 +180,13 @@
   (bthash-ref (EUF-state-representative t-state) tvar tvar)])
     (if res
         res
-        (error "rep is false! " tvar))))
+        (error "rep is false!" tvar))))
 
 (define (set-representative t-state tvar b′)
   (set-EUF-state-representative t-state
     (bthash-set (EUF-state-representative t-state) tvar b′)))
+
+(define (nodup-cons a lst)
+  (cond [(empty? lst) (list a)]
+        [(eqv? a (car lst)) lst]
+        [else (cons (car lst) (nodup-cons a (cdr lst)))]))
