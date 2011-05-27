@@ -87,7 +87,23 @@
 ;; Because of this, we have to know the representation of equalities
 ;; when querying the theory solver.
 (define (qfeuf-known-equalities-since t-state sat-level)
-  '()) ;; TODO
+  (let* ([classes (EUF-state-classes t-state)]
+         [old-classes (bthash-backtrack-to classes sat-level)]
+         [representatives (bthash-values (EUF-state-representative t-state))])
+    ;; walk the representatives and see what its class minus the previous class is.
+    (let loop ([representatives representatives])
+      (cond [(empty? representatives)
+             '()]
+            [else (let* ([rep (car representatives)]
+                         [rep-class (bthash-ref (EUF-state-classes t-state) rep '())]
+                         [old-rep (bthash-ref (EUF-state-representative t-state) rep rep)]
+                         [old-rep-class (bthash-ref old-classes old-rep '())]
+                         [new-equalities (remove* old-rep-class rep-class)])
+                    (if (empty? new-equalities)
+                        (loop (cdr representatives))
+                        (cons (filter-map (EUF-state-untranslator t-state)
+                                          (cons rep new-equalities))
+                              (loop (cdr representatives)))))])))) ;; TODO
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; T-Explain
@@ -221,3 +237,5 @@
                                          (= (f a1) a1)
                                          (= a0 a1))
                                     (not (= (f a0) (f a1))))))))
+
+(euf-solve '((formula (not (= 1 1)))))

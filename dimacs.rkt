@@ -29,7 +29,7 @@
       (cons
        ;; DIMACS has a 0 at the end of each clause. Drop it.
        (remove-duplicates (map string->number (drop-right (string-tokenize (read-line)) 1)))
-       (read-some-dimacs-clauses (+ -1 n)))))
+       (read-some-dimacs-clauses (sub1 n)))))
 
 (define (dimacs-polarity lit)
   (lit . > . 0))
@@ -52,7 +52,7 @@
     (error 'dimacs-lits->clause
            "There is an empty clause.  I don't think you will be satisfied.")]
    [else
-    (let* ((literals (list->vector (map (dimacs-lit->literal variables) dimacs-lits)))
+    (let* ((literals (list->vector dimacs-lits))
 	   (w1 (vector-ref literals 0))
 	   (w2 (vector-ref literals (- (vector-length literals) 1)))
 	   (C (clause literals w1 w2)))
@@ -60,15 +60,16 @@
       (add-literal-watched! C w2)
       C)]))
 
+;; num-clauses is not used, but exists for the interface.
 (define (dimacs-cnf->clauses num-clauses vars clauses)
-  (let*-values ([(clauses num-removed) (filter-not-count trivial-clause? clauses)]
-		[(num-clauses) (- num-clauses num-removed)]
-		[(ret) (make-vector num-clauses)])
-    (let recur ((idx 0) (clauses clauses))
-      (if (= idx num-clauses)
-	  ret
-	  (begin (vector-set! ret idx ((dimacs-lits->clause vars) (first clauses)))
-		 (recur (+ 1 idx) (rest clauses)))))))
+  (let ([idx (box 0)])
+    (make-immutable-hash
+     (filter-map
+      (λ (clause)
+         (and (not (trivial-clause? clause))
+              (begin0 (cons (unbox idx) ((dimacs-lits->clause vars) clause))
+                      (set-box! idx (add1 (unbox idx))))))
+      clauses))))
 
 ;; ... ∨ a ∨ ... ∨ ¬a ∨ ... = T
 (define (trivial-clause? C)

@@ -11,27 +11,7 @@
 	 rackunit)
 
 (provide propagate-assignment
-	 #;initial-bcp
-	 obliterate-lit!
-         resolve!-or-continue)
-
-;bcp-clause : Clause -> SMT
-#;(define (bcp-clause smt clause)
-  (if (and (literal-eq? (clause-watched1 clause) (clause-watched2 clause))
-           (literal-unassigned? (clause-watched1 clause)))
-      (propagate-assignment smt (clause-watched1 clause) clause)
-      smt))
-
-; initial-bcp : SMT -> SMT
-; Make sure we learn assignments from length 1 clauses in the beginning.
-#;(define (initial-bcp smt)
-  (let ([clauses (SMT-clauses smt)])
-    (let recur ([smt smt]
-		[idx 0])
-    (if (= idx (vector-length clauses))
-	smt
-	(recur (bcp-clause smt (vector-ref clauses idx))
-	       (add1 idx))))))
+         resolve-or-continue)
 
 ; learned-bcp : SMT * learned-clause -> SMT
 ; We've just learned something; do BCP on the new clause.
@@ -42,7 +22,7 @@
 			     (learned-clause-clause learned))
 			learned))
 
-(define (resolve!-or-continue smt t-state explanation)
+(define (resolve-or-continue smt t-state explanation)
   (define (vars->clause-of-not-and vars)
     (let* ([negate-assigned
             (map (lambda (v)
@@ -56,27 +36,24 @@
     (vars->clause-of-not-and (filter-not var-unassigned?
                                          (vector->list (SMT-variables smt)))))
   (cond [(eqv? explanation #t)
-         (new-T-State smt t-state)]
+         (set-SMT-T-State smt t-state)]
         [(not explanation)
          ;; no explanation, but bad
-         (resolve-conflict! smt (not-partial-assignment smt))]
+         (resolve-conflict smt (not-partial-assignment smt))]
         [else
          ;; explanation and bad
-         (resolve-conflict! smt
-                            ((dimacs-lits->clause (SMT-variables smt))
-                             explanation))]))
+         (resolve-conflict smt
+                           ((dimacs-lits->clause (SMT-variables smt))
+                            explanation))]))
 
 ; propagate-assignment : SMT * Literal * Clause + #f + (SMT-> T-State * Clause) -> SMT
 ; Assumes the given literal and does unit resolution
 (define (propagate-assignment smt lit clause)
-  (let*-values ([(smt) (SMT-satisfy-literal! smt lit)] ;; tell T-Solver lit is satisfied
-                [(dummy) (set-literal-igraph-node! ;; add to conflict graph
-                          lit
-                          (node (SMT-decision-level smt) clause))]
+  (let*-values ([(smt) (SMT-satisfy-literal smt lit clause)] ;; tell T-Solver lit is satisfied
                 ;; Is this small change blatantly wrong? (Don't try hard)
                 [(t-state res) ((T-Consistent?) (SMT-T-State smt) 0)]
                 ;; If so, resolve, otherwise continue.
-                [(smt) (resolve!-or-continue smt t-state res)]
+                [(smt) (resolve-or-continue smt t-state res)]
                 ;; Continued, so get theory implications
                 [(smt) (propagate-T-implications smt lit)]
                 ;; All clauses watching the negation should be updated (BCP)
@@ -88,7 +65,7 @@
   (if itr
       (let ([watching-clause (watched-iterate-clause itr)])
         ;; we lazily collect forgotten clauses.
-        (if (clause-forgotten? watching-clause)
+        (if (clause-forgotten? smt watching-clause)
             (propagate-clauses-watching smt (watched-iterate-remove itr) literal)
             ;; No conflict; keep propagating.
             (let-values ([(smt remove?)
@@ -112,39 +89,38 @@
 ;; Uses T-Propagate and T-Explain parameters
 (define (propagate-T-implications smt lit)
   (let-values ([(t-state lits)
-                ((T-Propagate) (SMT-T-State smt) (SMT-strength smt) (literal->dimacs lit))])
-    (debug "T-propagated lits " (literal->dimacs lit) lits)
-    (let t-propagate ([smt (new-T-State smt t-state)]
-                      [lits lits])
-      (if (empty? lits) ;; done propagating
-          smt
-          (t-propagate
-           (propagate-assignment
-            smt
-            ;; convert propagated lit from Dimacs
-            ((dimacs-lit->literal (SMT-variables smt)) (car lits))
-            ;; Don't calculate an explanation until you need to.
-            ;; We might have more theory state then, making it easier.
-            (T-Explanation-fn t-state (car lits)))
-           (cdr lits))))))
+                ((T-Propagate) (SMT-T-State smt) (SMT-strength smt) lit)])
+    (for/let [smt (set-SMT-T-State smt t-state)]
+             ([lit lits])
+      (propagate-assignment smt
+                            lit
+                            ;; Don't calculate an explanation until you need to.
+                            ;; We might have more theory state then, making it easier.
+                            (T-Explanation-fn t-state lit)
+                            lit))))
 
 (define ((T-Explanation-fn t-state dimacslit) smt)
-  (let-values ([(t-state explanation)
-                ((T-Explain) (SMT-T-State smt) (SMT-strength smt) dimacslit)])
-    (debug "T explanation " dimacslit explanation)
-    (values t-state
-            (clause-literals ((dimacs-lits->clause (SMT-variables smt)))))))
+  ((T-Explain) (SMT-T-State smt) (SMT-strength smt) dimacslit))
 
-(define (satisfy-literal! sat literal)
-  (set-var-value! (literal-var literal) (literal-polarity literal))
-  ;; for First-UIP
-  (set-var-timestamp! (literal-var literal)
-                      (SAT-Stats-assigned-order (SAT-statistics sat)))
-  ;; for faster unsetting in backjumps
-  (add-to-current-decision-level (SAT-inc-assigned-order sat) literal))
+(define (satisfy-literal sat literal dec-lev antecedent)
+  (let ([var (literal-var (SAT-variables sat) literal)])
+    (seq/let sat
+             (set-SAT-variables sat
+                                (bthash-set (SAT-variables sat)
+                                            (dimacs-lit->dimacs-var literal)
+                                            (var (var-heuristic var)
+                                                 ;; timestamp for first UIP
+                                                 (SAT-Stats-assigned-order (SAT-statistics sat))
+                                                 dec-lev
+                                                 antecedent
+                                                 (literal-polarity literal))))
+             (SAT-inc-assigned-order sat)
+             ;; for faster unsetting in backjumps
+             (set-SAT-sats-per-dec-lev sat (cons (add1 (car (SAT-sats-per-dec-lev sat)))
+                                                 (cdr (SAT-sats-per-dec-lev sat)))))))
 
-(define (SMT-satisfy-literal! smt literal)
-  (SMT (satisfy-literal! (SMT-sat smt) literal)
+(define (SMT-satisfy-literal smt literal antecedent)
+  (SMT (satisfy-literal (SMT-sat smt) literal (SMT-decision-level smt) antecedent)
        ;; Tell the T-Solver a literal has been satisfied
        ((T-Satisfy) (SMT-T-State smt) (literal->dimacs literal))
        (SMT-strength smt)
@@ -152,55 +128,31 @@
 
 ; Must obliterate all decided and implied literals from
 ; decision level to absolute level.
-; backjump! : SMT * DecisionLevel * Clause -> unit
-(define (backjump! smt absolute-level learned)
+; backjump : SMT * DecisionLevel * Clause -> unit
+(define (backjump smt absolute-level learned)
   ;; now is a good time to exponentially decay activation levels
   (let*-values ([(smt) (SMT-on-conflict smt)] ;; VSIDS, forget, restart
-                ;; this loop destroys all assignment-related information about literals
-                ;; down to (and including) absolute-level.
-                [(pa total-vars-obliterated)
-                 (obliterate-decision-levels!
-                  (- (SMT-decision-level smt) absolute-level)
-                  (SMT-partial-assignment smt)
-		   0)]
-                ;; update bookkeeping for the changed decision level
-                [(smt) (SMT-set-decision-level smt absolute-level)]
-                ;; don't grow assigned order too much. Cut back by how many assignments
-                ;; we have obliterated.
-                [(smt) (SMT-set-assigned-order smt (- (SMT-assigned-order smt) total-vars-obliterated))]
-                ;; obliterate gave us a new partial assignment
-                [(smt) (SMT-set-partial-assignment smt pa)]
-                ;; SAT-solver obliterated assignments. Tell T-solver to as well.
-                [(smt) (new-T-State smt ((T-Backjump) (SMT-T-State smt) total-vars-obliterated))])
-    ;; we only have one new clause that might have taught us something.
-    ;; Do a quick check to see if we can learn anything before
-    ;; going back to deciding.
-    (learned-bcp smt learned)))
-
-;; Nat -> (values partial-assignment total-vars-obliterated)
-(define (obliterate-decision-levels! num-levels-to-obliterate partial-assignment [total-vars-obliterated 0])
-  (cond [(zero? num-levels-to-obliterate)
-	 (values partial-assignment total-vars-obliterated)]
-	[else (obliterate-decision-levels!
-	       (sub1 num-levels-to-obliterate)
-	       (rest partial-assignment)
-	       (obliterate-decision-level! (first partial-assignment)
-					   total-vars-obliterated))]))
-
-(define (obliterate-decision-level! lits total-vars-obliterated)
-  (cond [(empty? lits) total-vars-obliterated]
-	[else
-	 (obliterate-lit! (first lits))
-         (obliterate-decision-level! (rest lits)
-                                     (add1 total-vars-obliterated))]))
-
-; obliterate! : Literal -> unit
-; unassign a literal
-(define (obliterate-lit! lit)
-  (let ([var (literal-var lit)])
-    (set-var-value!       var 'unassigned)
-    (set-var-igraph-node! var #f)
-    (set-var-timestamp!   var #f)))
+                [(dropped remaining) (split-at (SMT-sats-per-dec-lev smt)
+                                               (- (SMT-decision-level smt)
+                                                  absolute-level))]
+                [(total-vars-obliterated) (foldr + 0 dropped)])
+    (seq/let smt
+             ;; update bookkeeping for the changed decision level
+             (set-SMT-decision-level smt absolute-level)
+             ;; this undoes all assignment-related information about literals
+             ;; down to (and including) absolute-level.
+             (set-SMT-variables smt (bthash-backtrack-to (SMT-variables smt) absolute-level))
+             ;; don't grow assigned order too much. Cut back by how many assignments
+             ;; we have obliterated.
+             (set-SMT-assigned-order smt (- (SMT-assigned-order smt) total-vars-obliterated))
+             ;; obliterate gave us a new partial assignment
+             (set-SMT-sats-per-dec-lev smt remaining)
+             ;; SAT-solver obliterated assignments. Tell T-solver to as well.
+             (set-SMT-T-State smt ((T-Backjump) (SMT-T-State smt) total-vars-obliterated))
+             ;; we only have one new clause that might have taught us something.
+             ;; Do a quick check to see if we can learn anything before
+             ;; going back to deciding.
+             (learned-bcp smt learned))))
 
 ; Is this clause now a unit clause?
 ; update-watchedness : SMT * Clause * Literal -> (values SMT Maybe<Asserting-Level>)
@@ -213,7 +165,7 @@
     ['contradiction
      (if (zero? (SMT-decision-level smt)) ; don't need to do resolutions.
          (raise (unsat-exn smt))
-         (resolve-conflict! smt clause))]
+         (resolve-conflict smt clause))]
     [unit-literal  ;; found an implied literal. Immediately propagate.
      (values (propagate-assignment smt unit-literal clause) #f)]))
 
@@ -249,8 +201,8 @@
 ; Must resolve backwards along implied literals using their antecedents.
 ; Learn the asserting clause and return the asserting level in order
 ; to backjump.
-; resolve-conflict! : SMT * Clause * Literal -> ⊥
-(define (resolve-conflict! smt C)
+; resolve-conflict : SMT * Clause * Literal -> ⊥
+(define (resolve-conflict smt C)
   (let*-values ([(smt literals-to-learn)
                  (call-with-values (λ () (lemma->lits smt C)) first-UIP)]
                 [(level-to-backjump-to) (asserting-level smt literals-to-learn)]
@@ -267,7 +219,7 @@
                 [(smt learned-clause) (SMT-learn-clause smt literals-to-learn watch1 watch2)])
         (if (0 . > . level-to-backjump-to)
             (raise (unsat-exn smt)) ; We can imply #f without assumptions => UNSAT
-            (raise (bail-exn (backjump! smt level-to-backjump-to learned-clause))))))
+            (raise (bail-exn (backjump smt level-to-backjump-to learned-clause))))))
 
 ; asserting-clause? : Vector Literal -> Boolean
 ; Does this clause have only one node at the current decision level?
@@ -338,43 +290,3 @@
                    ;; We are NOT the other watched literal or
                    ;; there is NOT another watched literal.
                    (bcp-4cases clause p literal nonfalse-literal (add1 idx)))))]))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; BCP tests
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-#|
-; initialize now in smt-solve.rkt
-
-;; unit (case 3)
-(check equal?
-       (let ((smt (initialize (list 5 ; A B C D E
-                                    5 ; -A B ^ -A C ^ -B D ^ -C -D ^ A -C E
-                                    '((-1 2)
-                                      (-1 3)
-                                      (-2 4)
-                                      (-3 -4)
-                                      (1 -3 5)))
-                              #f
-                              0)))
-         (equal? (bcp-4cases (vector-ref (SMT-clauses smt) 0) ;clause
-			     (literal (vector-ref (SMT-variables smt) 0)
-				      #f))
-		 (vector-ref (clause-literals (vector-ref (SMT-clauses smt) 0)) 1)));p
-       #t)
-
-;; update (case 1)
-(check equal?
-       (let ((smt (initialize (list 5 ; A B C D E
-				    5 ; -A B ^ -A C ^ -B D ^ -C -D ^ A -C E
-				    '((-1 2)
-				      (-1 3)
-				      (-2 4)
-				      (-3 -4)
-				      (1 -3 5)))
-                              #f
-                              0)))
-	 (bcp-4cases (vector-ref (SMT-clauses smt) 4) ;clause
-		     (literal (vector-ref (SMT-variables smt) 0)
-			      #t)));p
-	 'skip)
-|#

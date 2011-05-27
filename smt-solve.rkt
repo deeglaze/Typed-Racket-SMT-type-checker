@@ -9,7 +9,6 @@
 	 "smt-interface.rkt"
 	 "dimacs.rkt"
 	 "debug.rkt")
-(require rackunit)
 
 (provide smt-solve
 	 smt-assign
@@ -26,7 +25,7 @@
   (match cnf
    ;; dimacs-style:
    [`(,var-count ,clause-count ((,lit ...) ...))
-    (let ((vars (make-n-vars var-count)))
+    (let ([vars (make-n-vars var-count)])
       (SMT (SAT (dimacs-cnf->clauses clause-count vars lit)
 		(empty-learned-clauses)
 		vars
@@ -39,26 +38,21 @@
 ;; kill all assignments and start again. Only works if we have randomness in our
 ;; variable choice
 (define (restart smt)
-  (obliterate-partial-assignment! (SMT-partial-assignment smt))
+  (kill-vars-activation! (SMT-variables smt))
   (SMT (SAT (SMT-clauses smt)
-	    (SMT-learned-clauses smt)
-	    (SMT-variables smt)
-	    '(())
-	    (reset-stats (SMT-statistics smt)))
+            (SMT-learned-clauses smt)
+            (bthash-backtrack-to (SMT-variables smt) 0)
+            '(0)
+            (reset-stats (SMT-statistics smt)))
        ((T-Restart) (SMT-T-State smt))
        (SMT-strength smt)
        (SMT-seed smt)))
 
-(define (obliterate-partial-assignment! pa)
-  (cond [(empty? pa) (void)]
-	[else (for-each restart-lit! (first pa))
-	      (obliterate-partial-assignment! (rest pa))]))
-
-(define (restart-lit! lit)
-  (let ((var (literal-var lit)))
-    (begin (obliterate-lit! lit)
-	   (set-var-pos-activation! var 0.0)
-	   (set-var-neg-activation! var 0.0))))
+(define (kill-vars-activation! vars)
+  (for ([(vid var) (bthash-iterate-first vars)])
+    (set-var-heuristic-pos-activation! (var-heuristic var) 0.0)
+    (set-var-heuristic-neg-activation! (var-heuristic var) 0.0)))
+        
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Learning from the T-solver
@@ -66,9 +60,9 @@
 
 (define (get-T-solver-blessing smt)
   (let*-values ([(t-state consistent) ((T-Consistent?) (SMT-T-State smt) +inf.0)]
-                [(smt) (new-T-State smt t-state)]
+                [(smt) (set-SMT-T-State smt t-state)]
                 ;; continue past this and we have a true satisfying assignment
-                [(smt) (resolve!-or-continue smt t-state consistent)])
+                [(smt) (resolve-or-continue smt t-state consistent)])
     (raise (sat-exn smt))))
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Literal choice functions
@@ -93,32 +87,33 @@
         (vsids-search smt vars 0 #f -1))))
 
 (define (choose-random-unassigned-literal smt vars)
-  (let ((unassigned (vector-filter var-unassigned? vars)))
+  (let ([unassigned (vector-filter var-unassigned? vars)])
     (if (zero? (vector-length unassigned))
         (get-T-solver-blessing smt)
         (literal (vector-ref unassigned (random (vector-length unassigned)))
-             (= 0 (random 2))))))
+                 (= 0 (random 2))))))
 
 ;; vsids-search : Index * Option var * Integer -> Literal
 (define (vsids-search smt vars idx candidate best)
-  (if (idx . < . (vector-length vars))
-      (let* ([var (vector-ref vars idx)]
-             [score (+ (var-pos-activation var)
-                       (var-neg-activation var))])
-        (if (var-unassigned? var)
-            (cond [(score . > .  best)
-                   (vsids-search smt vars (add1 idx) var score)]
-                  [else (vsids-search smt  vars (add1 idx) candidate best)])
-            (vsids-search smt vars (add1 idx) candidate best)))
-      (if (not candidate)
+  (cond [(idx . < . (vector-length vars))
+         (let* ([var (vector-ref vars idx)]
+                [score (+ (var-pos-activation var)
+                          (var-neg-activation var))])
+           (if (var-unassigned? var)
+               (cond [(score . > .  best)
+                      (vsids-search smt vars (add1 idx) var score)]
+                     [else (vsids-search smt vars (add1 idx) candidate best)])
+               (vsids-search smt vars (add1 idx) candidate best)))]
+        [(not candidate)
           ;; no candidates for assigning. We're done if T-solver says so.
-          (get-T-solver-blessing smt)
-          ;; Found the best candidate!
-          (cond [((var-pos-activation candidate)
-                  . > . 
-                  (var-neg-activation candidate))
-                 (literal candidate #t)]
-                [else (literal candidate #f)]))))
+         (get-T-solver-blessing smt)]
+        ;; Found the best candidate!
+        [else
+         (literal candidate
+                  ;; literal polarity depends on activation levels
+                  ((var-pos-activation candidate)
+                   . > . 
+                   (var-neg-activation candidate)))]))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Solver core
@@ -126,29 +121,30 @@
 (define (decide smt literal)
   ;; if interacting at the REPL, here is where we should check 
   ;; that ~literal isn't already assigned.
-  (let* ((smt (SMT-set-decision-level smt (+ 1 (SMT-decision-level smt))))
-	 (smt (SMT-set-partial-assignment smt (cons '() (SMT-partial-assignment smt)))))
+  (let* ([dec-lev (add1 (SMT-decision-level smt))]
+         [smt (set-SMT-decision-level smt dec-lev)]
+	 [smt (set-SMT-sats-per-dec-lev smt (cons 0 (SMT-sats-per-dec-lev smt)))]
+         [smt (set-SMT-variables smt (bthash-new-age (SMT-variables smt) dec-lev))])
     (propagate-assignment smt literal #f)))
 
 ;; do the decision loop
 (define (smt-search smt [choose-literal vsids])
-  (let keep-solving ([smt smt #;(initial-bcp smt)])
-    (keep-solving 
-     (with-handlers
-      ;; if propagate-assignment backjumps, we do nothing. 
-      ;; Just control to stop propagation.
-      ([bail-exn? (lambda (x) (bail-exn-smt x))]
-       [restart-exn? (lambda (x) (restart (restart-exn-smt x)))])
-      (decide smt (choose-literal smt))))))
+  (with-handlers
+   ;; if propagate-assignment backjumps, we do nothing. 
+   ;; Just control to stop propagation.
+   ([bail-exn? (lambda (x) (bail-exn-smt x))]
+    [restart-exn? (lambda (x) (restart (restart-exn-smt x)))])
+   (let keep-solving ([smt smt]) ;; loop until raise
+     (keep-solving (decide smt (choose-literal smt))))))
 
 ;; start a SMT instance and return the final state
 (define (smt-solve cnf t-state strength [seed #f] [choose-literal vsids])
-  (if seed
-      (random-seed seed)
-      (with-handlers 
-       ([sat-exn? (lambda (x) (debug "SAT" (SMT-partial-assignment (sat-exn-smt x))) x)]
-	[unsat-exn? (lambda (x) (debug "UNSAT" (SMT-partial-assignment (unsat-exn-smt x))) x)])
-       (smt-search (initialize cnf t-state strength) choose-literal))))
+  (when seed
+        (random-seed seed))
+  (with-handlers 
+   ([sat-exn? (lambda (x) x)]
+    [unsat-exn? (lambda (x) x)])
+   (smt-search (initialize cnf t-state strength) choose-literal)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;; Derived, useful interfaces for SMT and SAT
@@ -187,19 +183,3 @@
   (match (sat-solve cnf seed choose-literal)
     [(? sat-exn? smt) (extract-public-partial-assignment smt)]
     [(? unsat-exn? smt) 'UNSAT]))
-
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-;; A few sanity checks
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-
-(check equal?
-       (sat-decide '(1 2 ((1) (-1))))
-       'UNSAT)
-
-(check equal? 
-       (sat-decide '(5 5 ((-1 2) (-1 3) (-2 4) (-3 -4) (1 -3 5))))
-       'SAT)
-
-(check equal?
-       (sat-decide '(6 7 ((1 2) (2 3) (-1 -4 5) (-1 4 6) (-1 -5 6) (-1 4 -6) (-1 -5 -6))))
-       'SAT)

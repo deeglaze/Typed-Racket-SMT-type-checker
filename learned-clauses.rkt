@@ -20,7 +20,6 @@
   (and (learned-clause? clause)
        (learned-clause-forgotten? clause)))
 
-
 (define (add-learned-clause! lcs c)
   (splay-tree-set! lcs (learned-clause-activation c) c))
 
@@ -41,16 +40,16 @@
 	  new-lcs))))
 
 (define (forget-up-to-bound! lcs bound)
-  (let ((activation-at-bound 
-	 (let recur ((itr (splay-tree-iterate-least lcs))
-		     (count 0)
-		     (last-activation #f))
+  (let ([activation-at-bound
+	 (let recur ([itr (splay-tree-iterate-least lcs)]
+		     [count 0]
+		     [last-activation #f])
 	   (if (and itr
 		    (< count bound))
 	       (begin (set-learned-clause-forgotten?! 
 		       (splay-tree-iterate-value itr) #t)
 		      (recur (splay-tree-iterate-next lcs itr)
-			     (+ 1 count)
+			     (add1 count)
 			     (splay-tree-iterate-key itr)))
-	       last-activation))))
+	       last-activation))])
     (splay-tree-remove-range! lcs 0 activation-at-bound)))

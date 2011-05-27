@@ -2,10 +2,15 @@
 
 (require "data-structures.rkt"
          "proof-forest.rkt"
+         "../../macros.rkt"
          "../../debug.rkt"
          rackunit)
 
-(provide merge equality-holds? explain-complexEQ)
+(provide merge
+         equality-holds?
+         explain-complexEQ
+         get-representative
+         get-class)
 
 ;; Less mutation, so hopefully it makes more sense than
 ;; the Nieuwenhuis & Oliveras paper.
@@ -20,10 +25,10 @@
             [res (get-lookup t-state a₁′ a₂′)])
        (if (CurriedEQ? res)
            (propagate t-state (EQpair s=t res))
-           (seq/EUF-state t-state
-                          (set-lookup t-state a₁′ a₂′ s=t)
-                          (add-to-uses t-state a₁′ s=t)
-                          (add-to-uses t-state a₂′ s=t))))]
+           (seq/let t-state
+                    (set-lookup t-state a₁′ a₂′ s=t)
+                    (add-to-uses t-state a₁′ s=t)
+                    (add-to-uses t-state a₂′ s=t))))]
     [other (error 'merge "fail" other)]))
 
 (define (propagate t-state equality)
@@ -39,7 +44,7 @@
                               (length (get-class t-state b′)))
                           (values a a′ b b′ equality)
                           (values b b′ a a′ (flip-equality equality)))])
-          (seq/EUF-state
+          (seq/let
            t-state
            (set-EUF-state-proof
             t-state
@@ -49,8 +54,8 @@
 
 ;; lines 17-19 of the paper's pseudocode
 (define (union-equalities t-state a′ b′) ;; Returns EUF-state
-  (seq/EUF-state t-state
-    (for/EUF-state t-state ([c (get-class t-state a′)])
+  (seq/let t-state
+    (for/let [t-state t-state] ([c (get-class t-state a′)])
       (set-representative t-state c b′)
       (add-to-class t-state b′ c))
     (set-EUF-state-classes t-state
@@ -62,10 +67,10 @@
              [auses (get-uses t-state a′)]
              [pending '()])
     (if (empty? auses)
-        (seq/EUF-state t-state
-                       (set-EUF-state-uses t-state (bthash-set (EUF-state-uses t-state) a′ '()))
-                       (for/EUF-state t-state ([equality pending])
-                         (propagate t-state equality)))
+        (for/let [t-state (set-EUF-state-uses t-state
+                                              (bthash-set (EUF-state-uses t-state) a′ '()))]
+                 ([equality pending])
+          (propagate t-state equality)))
         (let* ([ceq (car auses)]
                [c₁′ (get-representative t-state (CurriedEQ-g ceq))]
                [c₂′ (get-representative t-state (CurriedEQ-arg ceq))]
@@ -75,10 +80,10 @@
                     (cdr auses)
                     (cons (EQpair (CurriedEQ c₁′ c₂′ (CurriedEQ-a ceq)) lookup)
                           pending))
-              (seq/EUF-state t-state
-                             (set-lookup t-state c₁′ c₂′ ceq)
-                             (add-to-uses t-state b′ ceq)
-                             (loop t-state (cdr auses) pending)))))))
+              (seq/let t-state
+                       (set-lookup t-state c₁′ c₂′ ceq)
+                       (add-to-uses t-state b′ ceq)
+                       (loop t-state (cdr auses) pending)))))))
 
 (define (explain-complexEQ t-state equality)
   (if (ConstEQ? equality)
